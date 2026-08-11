@@ -30,7 +30,7 @@
 
 ### Installation
 
-Download the interpreter `rb10.exe` or build from source:
+Download the interpreter `rb.exe` or build from source:
 
 ```bash
 git clone https://github.com/yourusername/lgbtscript.git

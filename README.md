@@ -4,26 +4,9 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
----
-
 ## Table of Contents
 
 - [Introduction](#introduction)
-- [Installation & Running](#installation--running)
-- [Syntax & Keywords](#syntax--keywords)
-- [Data Types](#data-types)
-- [Variables & Declarations](#variables--declarations)
-- [Control Flow](#control-flow)
-- [Functions (`rainbow`)](#functions-rainbow)
-- [OOP: QUEER Classes](#oop-queer-classes)
-- [Arrays](#arrays)
-- [Built‑in Functions](#builtin-functions)
-- [Social Functions](#social-functions)
-- [Server Functions](#server-functions)
-- [Error Handling](#error-handling)
-- [The `#inclusive` Directive](#the-inclusive-directive)
-- [Code Examples](#code-examples)
-- [License](#license)
 
 ---
 

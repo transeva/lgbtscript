@@ -3,26 +3,31 @@
 > An inclusive, expressive programming language for everyone  
 > *"Love is code that doesn't need compilation"*
 
-[![Version](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)](https://github.com/yourusername/lgbtscript)
-[![License](https://img.shields.io/badge/license-APACHE-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.0.0-brightgreen.svg)](https://github.com/yourusername/lgbtscript)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![Made with Love](https://img.shields.io/badge/Made%20with-❤️-ff69b4.svg)](https://github.com/yourusername/lgbtscript)
-
-
+[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org)
 
 ---
 
-**LGBTScript** is an interpreted programming language built with inclusivity, friendliness, and expressiveness in mind. Keywords are inspired by LGBTQ+ community themes, making code not only functional but also symbolic.
+**LGBTScript** is an interpreted programming language built with inclusivity, friendliness, and expressiveness in mind. Keywords are inspired by LGBTQ+ community themes, making code not only functional but also symbolic. With built-in social support functions, educational tools, and community resources, LGBTScript empowers developers to create applications that support and celebrate diversity.
 
-### ✨ Features
+## ✨ Features
 
-- 🔤 **4 primitive types**: `lesbian` (string), `gay` (integer), `trans` (float), `nonbinary` (boolean)
+- 🔤 **5 primitive types**: `lesbian` (string), `gay` (integer), `trans` (float), `nonbinary` (boolean), `gender` (array)
 - 📦 **Dynamic arrays** with flexible sizing
 - 🧩 **Functions** with export support (`export rainbow`)
-- 🔄 **Control flow**: `gender` (if), `queer` (else), `pride` (while)
+- 🔄 **Control flow**: `cis` (if), `nocis` (else if/else), `pride` (while)
 - 📂 **Built-in functions** for file I/O, HTTP, JSON, cryptography, regex, and system operations
 - 📚 **Library imports** via `#intersex`
 - 🛡️ **Error handling** with `try`/`catch`
+- 🌈 **Social support functions** - Crisis support, mental health, education
+- 🏥 **Medical information** - HRT, LGBTQ+ friendly doctors
+- 🎉 **Community tools** - Events, groups, volunteering
+- 🎨 **Cultural resources** - Books, playlists, movies
+- 🔒 **Sandbox security** - Safe execution environment
+- 🧵 **Thread-safe** - Built-in concurrency safety
 
 ---
 
@@ -39,11 +44,11 @@ go build -o rb.exe main.go
 Your First Program
 Create a file hello.rainbow:
 
-rainbow
+go
 @ First LGBTScript program
 
 lesbian name = "World";
-comingout "Hello, " + name + "!";
+comingout "Hello, " + name + "! 🌈";
 Run it:
 
 bash
@@ -60,8 +65,9 @@ String	lesbian	Text data	""
 Integer	gay	Whole numbers	0
 Float	trans	Decimal numbers	0.0
 Boolean	nonbinary	true or false	false
+Array	gender	Collection of values	[]
 Literals
-rainbow
+go
 "Hello, World!"   @ String
 42                @ Integer
 3.14              @ Float
@@ -70,12 +76,13 @@ true              @ Boolean
 📦 Variables
 Variables are declared with a type. Default values depend on the type:
 
-rainbow
+go
 @ Declaration with initialization
 lesbian name = "Alice";
 gay age = 30;
 trans pi = 3.14159;
 nonbinary isReady = true;
+gender hobbies = ["reading", "coding", "gaming"];
 
 @ Declaration without initialization (gets default value)
 lesbian message;
@@ -84,6 +91,7 @@ comingout message;  @ outputs empty string
 @ Assignment (type must match)
 name = "Bob";
 age = age + 1;
+hobbies[0] = "swimming";
 ➕ Operators
 Arithmetic
 text
@@ -97,17 +105,20 @@ text
 String Concatenation
 The + operator works with strings too:
 
-rainbow
+go
 lesbian greeting = "Hello, " + "World!";
+lesbian full = "Value: " + 42;  @ "Value: 42"
 📊 Arrays
 Arrays can hold any values, including mixed types.
 
-rainbow
-gay numbers = [1, 2, 3, 4, 5];
-lesbian fruits = ["apple", "banana", "cherry"];
+go
+gender numbers = [1, 2, 3, 4, 5];
+gender fruits = ["apple", "banana", "cherry"];
+gender mixed = ["text", 42, true, 3.14];
 
 @ Index access
 comingout numbers[0];  @ 1
+comingout mixed[1];    @ 42
 
 @ Index assignment
 numbers[2] = 99;
@@ -117,15 +128,17 @@ append(numbers, 6);        @ adds an element
 gay len = length(numbers); @ array length
 remove(numbers, 0);        @ removes element at index
 🔄 Control Flow
-Conditional Statement gender
-rainbow
-gender (age >= 18) {
+Conditional Statement cis / nocis
+go
+cis (age >= 18) {
     comingout "You are an adult";
-} queer {
-    comingout "You are a minor";
+} nocis (age >= 13) {
+    comingout "You are a teenager";
+} nocis {
+    comingout "You are a child";
 }
 Loop pride
-rainbow
+go
 gay i = 0;
 pride (i < 5) {
     comingout "Count: " + i;
@@ -134,7 +147,7 @@ pride (i < 5) {
 🧩 Functions
 Functions are declared with the rainbow keyword. Export with export.
 
-rainbow
+go
 @ Simple function
 rainbow greet(name) {
     return "Hello, " + name + "!";
@@ -148,7 +161,52 @@ export rainbow calculate(a, b) {
 @ Function call
 lesbian msg = greet("Alice");
 comingout msg;
+🛡️ Error Handling
+The try / catch construct catches errors. The error variable is available in the catch block.
+
+go
+try {
+    lesbian result = httpGet("https://invalid.url");
+    comingout result;
+} catch {
+    comingout "Error: " + error;
+}
+📚 Libraries
+Import external libraries using the #intersex directive:
+
+go
+@ Import libraries
+#intersex "math.rainbow"
+#intersex "io.rainbow"
+Library search paths:
+
+Current directory
+
+Directory of the executable
+
+libs and libraries folders
+
 🧰 Built-in Functions
+🌈 Social & Support Functions
+Function	Description	Example
+findSafeSpace(place, city, radius)	Finds LGBTQ+ friendly places nearby	findSafeSpace("cafe", "Moscow", 5)
+getCrisisSupport(region, type)	Gets crisis support contacts	getCrisisSupport("Russia", "hotline")
+getLGBTQLaws(country, category)	Gets information about LGBTQ+ laws	getLGBTQLaws("USA", "rights")
+getDailyAffirmation(theme)	Gets a daily affirmation	getDailyAffirmation("self-love")
+moodCheck(moods, suggestResources)	Checks emotional state	moodCheck(["anxiety"], true)
+guidedBreathing(minutes, theme)	Guided breathing exercises	guidedBreathing(5, "calm")
+defineTerm(term, language)	Defines LGBTQ+ terms	defineTerm("nonbinary", "ru")
+lgbtHistoryQuiz(difficulty)	LGBTQ+ history quiz	lgbtHistoryQuiz("medium")
+getDailyFact(category, region)	Daily LGBTQ+ fact	getDailyFact("culture", "global")
+getHRTInfo(country, type)	Hormone replacement therapy info	getHRTInfo("USA", "MTF")
+findLGBTDoctor(specialty, city)	Find LGBTQ+ friendly doctors	findLGBTDoctor("therapist", "Berlin")
+getDocumentChangeGuide(country, document)	Guide for changing documents	getDocumentChangeGuide("UK", "passport")
+getLGBTQEvents(days, type)	Upcoming LGBTQ+ events	getLGBTQEvents(30, "online")
+createLGBTQGroup(name, meetingType)	Creates an LGBTQ+ group	createLGBTQGroup("Book Club", "online")
+findVolunteerOpportunity(organization, skills)	Finds volunteer opportunities	findVolunteerOpportunity("Rainbow Org", ["design"])
+getLGBTQBook(genre)	LGBTQ+ book recommendations	getLGBTQBook("fantasy")
+getLGBTQPlaylist(mood)	LGBTQ+ playlist recommendations	getLGBTQPlaylist("empowerment")
+getLGBTQMovies(genre)	LGBTQ+ movie recommendations	getLGBTQMovies("romance")
 📁 File System
 Function	Description
 readFile(filename)	Reads file, returns string
@@ -198,52 +256,11 @@ sleep(ms)	Sleep in milliseconds
 append(array, element)	Adds element to array
 remove(array, index)	Removes element at index
 sendEmail(to, subject, body)	Email simulation
-Usage Example
-rainbow
-@ File and HTTP operations
-lesbian data = readFile("config.json");
-lesbian config = jsonParse(data);
-comingout "URL: " + config["api_url"];
-
-lesbian response = httpGet(config["api_url"]);
-writeFile("response.txt", response);
-
-@ Cryptography
-lesbian hash = md5(response);
-comingout "MD5: " + hash;
-
-@ System information
-lesbian os = getOS();
-lesbian host = getHostname();
-comingout "OS: " + os + ", Host: " + host;
-🛡️ Error Handling
-The try / catch construct catches errors. The error variable is available in the catch block.
-
-rainbow
-try {
-    lesbian result = httpGet("https://invalid.url");
-    comingout result;
-} catch {
-    comingout "Error: " + error;
-}
-📚 Libraries
-Import external libraries using the #intersex directive:
-
-rainbow
-@ Import libraries
-#intersex "math.rainbow"
-#intersex "io.rainbow"
-Library search paths:
-
-Current directory
-
-Directory of the executable
-
-libs and libraries folders
-
+help(country)	LGBTQ+ organization support
+orientation()	Interactive orientation test
 💻 Command Line Interface
 bash
-rb10.exe [options] [file]
+rb.exe [options] [file]
 
 Options:
   -c "code"         Execute code from command line
@@ -251,24 +268,57 @@ Options:
   -tokens           Show tokens after lexical analysis
   -ast              Show AST after parsing
   -debug            Enable debug mode
-  -example          Show extended example
+  -example          Show extended example with social functions
 
 Examples:
-  rb10.exe script.rainbow
-  rb10.exe -c 'comingout "Hello!";'
-  rb10.exe -lgbt script.rainbow -tokens
+  rb.exe script.rainbow
+  rb.exe -c 'comingout "Hello!";'
+  rb.exe -lgbt script.rainbow -tokens
+  rb.exe --example
 📝 Examples
 Basic Example
-rainbow
+go
 @ Simple program
 lesbian name = "World";
-comingout "Hello, " + name + "!";
+comingout "Hello, " + name + "! 🌈";
 
 gay x = 10;
 gay y = 20;
 comingout "Sum: " + (x + y);
+Social Support Example
+go
+@ LGBTQ+ Support Program
+
+rainbow main() {
+    comingout "🌈 Welcome to LGBTScript Support!";
+    
+    @ Get crisis support
+    lesbian support = getCrisisSupport("Russia", "hotline");
+    comingout support;
+    
+    @ Daily affirmation
+    lesbian affirmation = getDailyAffirmation("self-love");
+    comingout affirmation;
+    
+    @ Check mood
+    gender moods = ["anxiety", "loneliness"];
+    lesbian moodResult = moodCheck(moods, true);
+    comingout moodResult;
+    
+    @ Find safe spaces
+    lesbian spaces = findSafeSpace("cafe", "Moscow", 5);
+    comingout spaces;
+    
+    @ Get book recommendation
+    lesbian book = getLGBTQBook("fantasy");
+    comingout book;
+    
+    return 0;
+}
+
+main();
 File and HTTP Operations
-rainbow
+go
 #intersex "io.rainbow"
 
 lesbian url = "https://api.github.com";
@@ -280,7 +330,7 @@ try {
     comingout "Error: " + error;
 }
 Functions and Arrays
-rainbow
+go
 export rainbow processArray(arr) {
     gay sum = 0;
     gay i = 0;
@@ -295,7 +345,7 @@ gay numbers = [1, 2, 3, 4, 5];
 gay total = processArray(numbers);
 comingout "Sum: " + total;
 Extended Example
-rainbow
+go
 @ Extended LGBTScript example
 
 @ Import libraries
@@ -328,7 +378,7 @@ rainbow main() {
     }
     
     @ Array operations
-    gay numbers = [1, 2, 3, 4, 5];
+    gender numbers = [1, 2, 3, 4, 5];
     append(numbers, 6);
     comingout "Numbers: " + numbers;
     comingout "First element: " + numbers[0];
@@ -356,8 +406,18 @@ rainbow main() {
     gay args = getArgs();
     comingout "Arguments: " + args;
     
+    @ Social support
+    lesbian support = getCrisisSupport("global", "hotline");
+    comingout support;
+    
+    lesbian affirmation = getDailyAffirmation("strength");
+    comingout affirmation;
+    
+    lesbian book = getLGBTQBook("fantasy");
+    comingout "Recommended book: " + book;
+    
     nonbinary verbose = hasFlag("--verbose");
-    if (verbose) {
+    cis (verbose) {
         comingout "Verbose mode enabled";
     }
     
@@ -366,14 +426,47 @@ rainbow main() {
 
 @ Run
 main();
-help Command — LGBTQ+ Organization Support
-rainbow
+Help Command — LGBTQ+ Organization Support
+go
 help "russia";   @ Shows organizations in Russia
 help "usa";      @ Shows organizations in the USA
 help "all";      @ Shows international organizations
-orientation Command — Orientation Test
-rainbow
+Orientation Command — Orientation Test
+go
 orientation;     @ Runs an interactive orientation test
+🔒 Security Features
+LGBTScript includes built-in security features:
+
+Sandbox Environment: Restricted file system access
+
+Blocked Paths: /etc, /proc, /sys, /root, /home
+
+File Size Limits: Maximum 10MB file size
+
+HTTP Timeout: 30 second timeout for requests
+
+Recursion Limit: Maximum 1000 recursive calls
+
+Domain Blocking: Localhost and 127.0.0.1 blocked for HTTP
+
+Thread-Safe: Mutex protection for concurrent execution
+
+🤝 Contributing
+We welcome contributions! Please see our Contributing Guide for details.
+
+Fork the repository
+
+Create your feature branch (git checkout -b feature/AmazingFeature)
+
+Commit your changes (git commit -m 'Add some AmazingFeature')
+
+Push to the branch (git push origin feature/AmazingFeature)
+
+Open a Pull Request
+
+📄 License
+This project is licensed under the MIT License — see the LICENSE file for details.
+
 🌈 Community
 🐛 Report an issue
 
@@ -381,12 +474,9 @@ orientation;     @ Runs an interactive orientation test
 
 📚 Documentation
 
-📄 License
-This project is licensed under the MIT License — see the LICENSE file for details.
+💬 Discord Community
 
-<div align="center">
-🌈 LGBTScript — a language where everyone can find themselves
-
+<div align="center"> 🌈 LGBTScript — a language where everyone can find themselves
 Made with love for everyone
 
 ⬆ Back to top

@@ -52,7 +52,7 @@ Download the interpreter `rb10.exe` or build from source:
 ```bash
 git clone https://github.com/yourusername/lgbtscript.git
 cd lgbtscript
-go build -o rb10.exe main.go
+go build -o rb.exe main.go
 Your First Program
 Create a file hello.rainbow:
 
@@ -64,11 +64,11 @@ comingout "Hello, " + name + "!";
 Run it:
 
 bash
-rb10.exe hello.rainbow
+rb.exe hello.rainbow
 Or execute code directly:
 
 bash
-rb10.exe -c 'comingout "🌈 Hello from LGBTScript!";'
+rb.exe -c 'comingout "🌈 Hello from LGBTScript!";'
 🏷️ Data Types
 LGBTScript uses inclusive keywords for type declarations:
 

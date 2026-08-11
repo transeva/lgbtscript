@@ -21,7 +21,7 @@ LGBTScript is an interpreted language created to support the LGBTQ+ community. I
 Compile the source code (`lgbt.go`) with Go:
 
 ```bash
-go build -o lgbt lgbt.go
+go build -o rb rb.go
 Run:
 
 bash

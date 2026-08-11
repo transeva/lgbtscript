@@ -8,22 +8,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![Made with Love](https://img.shields.io/badge/Made%20with-❤️-ff69b4.svg)](https://github.com/yourusername/lgbtscript)
 
-## 📋 Table of Contents
 
-- [Introduction](#-introduction)
-- [Quick Start](#-quick-start)
-- [Data Types](#-data-types)
-- [Variables](#-variables)
-- [Operators](#-operators)
-- [Arrays](#-arrays)
-- [Control Flow](#-control-flow)
-- [Functions](#-functions)
-- [Built-in Functions](#-built-in-functions)
-- [Error Handling](#-error-handling)
-- [Libraries](#-libraries)
-- [CLI](#-cli)
-- [Examples](#-examples)
-- [License](#-license)
 
 ---
 

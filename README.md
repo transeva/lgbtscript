@@ -12,8 +12,6 @@
 
 ---
 
-## 🏳️‍🌈 Introduction
-
 **LGBTScript** is an interpreted programming language built with inclusivity, friendliness, and expressiveness in mind. Keywords are inspired by LGBTQ+ community themes, making code not only functional but also symbolic.
 
 ### ✨ Features

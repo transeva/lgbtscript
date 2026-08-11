@@ -1,53 +1,53 @@
 # 🌈 LGBTScript
 
-> Инклюзивный, выразительный язык программирования для всех  
-> *«Любовь — это код, который не требует компиляции»*
+> An inclusive, expressive programming language for everyone  
+> *"Love is code that doesn't need compilation"*
 
 [![Version](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)](https://github.com/yourusername/lgbtscript)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 [![Made with Love](https://img.shields.io/badge/Made%20with-❤️-ff69b4.svg)](https://github.com/yourusername/lgbtscript)
 
-## 📋 Содержание
+## 📋 Table of Contents
 
-- [Введение](#-введение)
-- [Быстрый старт](#-быстрый-старт)
-- [Типы данных](#-типы-данных)
-- [Переменные](#-переменные)
-- [Операторы](#-операторы)
-- [Массивы](#-массивы)
-- [Управление потоком](#-управление-потоком)
-- [Функции](#-функции)
-- [Встроенные функции](#-встроенные-функции)
-- [Обработка ошибок](#-обработка-ошибок)
-- [Библиотеки](#-библиотеки)
+- [Introduction](#-introduction)
+- [Quick Start](#-quick-start)
+- [Data Types](#-data-types)
+- [Variables](#-variables)
+- [Operators](#-operators)
+- [Arrays](#-arrays)
+- [Control Flow](#-control-flow)
+- [Functions](#-functions)
+- [Built-in Functions](#-built-in-functions)
+- [Error Handling](#-error-handling)
+- [Libraries](#-libraries)
 - [CLI](#-cli)
-- [Примеры](#-примеры)
-- [Лицензия](#-лицензия)
+- [Examples](#-examples)
+- [License](#-license)
 
 ---
 
-## 🏳️‍🌈 Введение
+## 🏳️‍🌈 Introduction
 
-**LGBTScript** — это интерпретируемый язык программирования, созданный с идеей инклюзивности, дружелюбности и выразительности. Ключевые слова вдохновлены тематикой ЛГБТК+ сообщества, что делает код не только функциональным, но и символичным.
+**LGBTScript** is an interpreted programming language built with inclusivity, friendliness, and expressiveness in mind. Keywords are inspired by LGBTQ+ community themes, making code not only functional but also symbolic.
 
-### ✨ Особенности
+### ✨ Features
 
-- 🔤 **4 базовых типа**: `lesbian` (строка), `gay` (число), `trans` (float), `nonbinary` (bool)
-- 📦 **Массивы** с динамическим размером
-- 🧩 **Функции** с экспортом (`export rainbow`)
-- 🔄 **Управление потоком**: `gender` (if), `queer` (else), `pride` (while)
-- 📂 **Встроенные функции** для работы с файлами, HTTP, JSON, криптографией, регулярками и системой
-- 📚 **Подключение библиотек** через `#intersex`
-- 🛡️ **Обработка ошибок** через `try`/`catch`
+- 🔤 **4 primitive types**: `lesbian` (string), `gay` (integer), `trans` (float), `nonbinary` (boolean)
+- 📦 **Dynamic arrays** with flexible sizing
+- 🧩 **Functions** with export support (`export rainbow`)
+- 🔄 **Control flow**: `gender` (if), `queer` (else), `pride` (while)
+- 📂 **Built-in functions** for file I/O, HTTP, JSON, cryptography, regex, and system operations
+- 📚 **Library imports** via `#intersex`
+- 🛡️ **Error handling** with `try`/`catch`
 
 ---
 
-## 🚀 Быстрый старт
+## 🚀 Quick Start
 
-### Установка
+### Installation
 
-Скачайте интерпретатор `rb10.exe` или соберите из исходников:
+Download the interpreter `rb10.exe` or build from source:
 
 ```bash
 git clone https://github.com/yourusername/lgbtscript.git

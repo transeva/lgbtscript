@@ -52,4 +52,4 @@ Download the interpreter `rb.exe` or build from source:
 ```bash
 git clone https://github.com/yourusername/lgbtscript.git
 cd lgbtscript
-go build -o rb10.exe main.go
+go build -o rb.exe main.go

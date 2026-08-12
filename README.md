@@ -1,337 +1,158 @@
 # 🌈 LGBTScript
 
-**LGBTScript** is an inclusive programming language with LGBTQ+ community support, built‑in social functions, an embedded web server, and OOP based on `QUEER` classes.
-
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/)
 
-## Table of Contents
+**LGBTScript** is an interpreted programming language designed with inclusivity at its core. It features a unique, pride-inspired syntax, built-in functions for LGBTQ+ support, and capabilities for web server development. It aims to be a welcoming and safe space for everyone to learn and create.
 
-- [Introduction](#introduction)
+## ✨ Features
 
----
+- 🏳️‍🌈 **Inclusive Syntax:** Uses keywords like `lesbian`, `gay`, `trans`, `nonbinary`, and `gender` for variable types.
+- 🛠️ **Built-in Social & Support Functions:** Access resources for crisis support, find safe spaces, learn about LGBTQ+ history, and more directly from your code.
+- 🌐 **Web Server Capabilities:** Create, configure, and run your own web servers using built-in functions.
+- 🧩 **Object-Oriented Programming:** Full support for classes (`queer`), inheritance (`extends`), methods, and the `this`/`super` keywords.
+- 🔒 **Secure & Sandboxed:** Includes a sandbox environment to prevent unsafe file system and network access.
+- ❤️ **Community Focused:** Built as a safe and educational space for the LGBTQ+ community and allies.
 
-## Introduction
+## 🚀 Getting Started
 
-LGBTScript is an interpreted language created to support the LGBTQ+ community. It combines a friendly syntax with powerful features: file I/O, HTTP requests, cryptography, web server creation, social functions (help, resources, psychological support), and full OOP.
+### Installation
 
----
-
-## Installation & Running
-
-Compile the source code (`lgbt.go`) with Go:
+You need Go (1.20+) installed to build LGBTScript.
 
 ```bash
-go build -o rb rb.go
-Run:
+git clone https://github.com/your-username/lgbt-script.git
+cd lgbt-script
+go build -o lgbt
+This will create the lgbt executable in your current directory.
+
+Hello, World!
+Create a file named hello.rainbow:
+
+ruby
+@ Hello World program
+rainbow main() {
+    comingout "Hello, World! 🌈";
+}
+
+main();
+Run it:
 
 bash
-./lgbt [flag] [file.rainbow]
-Flags:
+./lgbt hello.rainbow
+📖 Language Guide
+Variable Declarations
+Keyword	Data Type	Description
+lesbian	String	Text strings
+gay	Int	Integer numbers
+trans	Float	Floating-point numbers
+nonbinary	Bool	Boolean values
+gender	Array	Lists/Arrays
+Example:
 
-Flag	Description
--c "code"	Execute code from the command line
--tokens	Print tokens (lexical analysis)
--ast	Print the AST (syntax tree)
--debug	Enable debug mode
--example	Show an extended example
--lgbt file	Execute a code file
-You can also specify a file as a positional argument.
-
-Syntax & Keywords
-Keywords (case‑insensitive):
-
-lesbian – string type
-
-gay / asexual – integer type
-
-trans – floating‑point type
-
-nonbinary – boolean type
-
-gender – array type
-
-comingout – print output
-
-cis – conditional (if)
-
-nocis – else if / else
-
-pride – while loop
-
-homo – for loop
-
-rainbow – function declaration
-
-return – return from function
-
-help – display information about LGBTQ+ organisations
-
-orientation – run an orientation test
-
-try / catch – exception handling
-
-export – export a function (for libraries)
-
-queer – class declaration
-
-new – instantiate a class
-
-this / super – references to current/parent object
-
-extends – inheritance
-
-Comments start with @.
-
-Data Types
-Keyword	Type	Example
-lesbian	string	"Hello"
-gay / asexual	integer	42
-trans	float	3.14
-nonbinary	boolean	true / false
-gender	array	[1, 2, 3]
-Variables & Declarations
-rainbow
+ruby
 lesbian name = "Alex";
-gay age = 25;
-trans height = 1.75;
-nonbinary isStudent = true;
+gay age = 30;
+trans height = 5.9;
+nonbinary is_student = true;
 gender colors = ["red", "green", "blue"];
+Control Structures
+If-Else: cis (condition) { ... } nocis (condition) { ... }
 
-name = "Maria";
-age = age + 1;
-If no initial value is given, a default is used (empty string, 0, 0.0, false, empty array).
+While Loop: pride (condition) { ... }
 
-Control Flow
-cis (if)
-rainbow
-cis (age >= 18) {
-    comingout "Adult";
-} nocis (age > 12) {
-    comingout "Teenager";
-} nocis {
-    comingout "Child";
+For Loop: sex (init; condition; update) { ... }
+
+Example of a For Loop:
+
+ruby
+sex (gay i = 0; i < 5; i++) {
+    comingout "Number: " + i;
 }
-pride (while)
-rainbow
-gay i = 0;
-pride (i < 5) {
-    comingout i;
-    i = i + 1;
-}
-homo (for)
-rainbow
-homo (gay j = 0; j < 3; j = j + 1) {
-    comingout "j = " + j;
-}
-Functions (rainbow)
-rainbow
-rainbow sum(a, b) {
+Functions
+Define functions using the rainbow keyword.
+
+ruby
+rainbow add(gay a, gay b) {
     return a + b;
 }
-rainbow main() {
-    comingout sum(5, 7); // 12
-}
-Functions can be exported with export.
 
-OOP: QUEER Classes
-rainbow
+gay sum = add(5, 3);
+comingout sum;  # Outputs 8
+Object-Oriented Programming
+Define classes with queer. Use extends for inheritance.
+
+ruby
 queer Person {
     lesbian name;
     gay age;
-    
-    rainbow init(nameVal, ageVal) {
-        this.name = nameVal;
-        this.age = ageVal;
-    }
-    
-    rainbow introduce() {
-        comingout "Hello, I am " + this.name;
-    }
-}
 
-queer Student extends Person {
-    lesbian university;
-    
-    rainbow init(nameVal, ageVal, univ) {
-        super.init(nameVal, ageVal);
-        this.university = univ;
+    rainbow init(name, age) {
+        this.name = name;
+        this.age = age;
+    }
+
+    rainbow greet() {
+        comingout "Hello, my name is " + this.name;
     }
 }
 
-gender p = new Person("Alex", 25);
-p.introduce();
-Arrays
-rainbow
-gender arr = [1, 2, 3];
-comingout arr[0]; // 1
-arr[1] = 99;
-Built‑in Functions
-File I/O: readFile, writeFile, fileExists, getDirFiles
-
-Strings: split, replace, trim, length, toUpper, toLower
-
-Arrays: append, remove
-
-Math: random, max, min, sqrt, pow
-
-Time: getTime, getYear, getMonth
-
-System: getOS, getHostname, getArgs, hasFlag
-
-HTTP: httpGet, httpPost
-
-JSON: jsonParse
-
-Cryptography: md5, sha256
-
-Regex: regexFind, regexReplace
-
-Other: sleep, sendEmail (demo), flag (returns the rainbow colours).
-
-Social Functions
-findSafeSpace(place, city, radius)
-
-getCrisisSupport(region, type)
-
-getLGBTQLaws(country, category)
-
-getDailyAffirmation(theme)
-
-moodCheck(moods, suggestResources)
-
-guidedBreathing(minutes, theme)
-
-defineTerm(term, language)
-
-lgbtHistoryQuiz(difficulty)
-
-getDailyFact(category, region)
-
-getHRTInfo(country, hrtType)
-
-findLGBTDoctor(specialty, city)
-
-getDocumentChangeGuide(country, document)
-
-getLGBTQEvents(days, type)
-
-createLGBTQGroup(name, meetingType)
-
-findVolunteerOpportunity(organization, skills)
-
-getLGBTQBook(genre)
-
-getLGBTQPlaylist(mood)
-
-getLGBTQMovies(genre)
-
-getPrideParadeInfo(city, year)
-
-getComingOutTips(audience)
-
-getTransHealthcare(country)
-
-findLGBTQShelter(location)
-
-getIntersexResources(country)
-
-getNonbinaryGuide()
-
-findLGBTQTherapist(specialty, location)
-
-getAsylumInfo(country)
-
-getAsexualResources()
-
-getPolyamoryGuide()
-
-getGenderAffirmingCare(country)
-
-findLGBTQCommunity(interest)
-
-getLGBTQHistory(era)
-
-getLGBTQParenting()
-
-getConversionTherapyHelp()
-
-getLGBTQHousing(location)
-
-getQueerArt(medium)
-
-getLGBTQFriendlyCities(criteria)
-
-Server Functions
-rainbow
-createServer("myapi", 8080);
-addRoute("myapi", "GET", "/hello", rainbow(query, body) {
-    return "Hello, LGBTQ+!";
-});
-startServer("myapi");
-Available functions:
-
-createServer(name, port)
-
-startServer(name)
-
-stopServer(name)
-
-addRoute(server, method, path, handler)
-
-getServerStatus(name)
-
-listServers()
-
-The handler receives query (array of key‑value pairs) and body (string).
-
+queer p = new Person("Taylor", 25);
+p.greet();
 Error Handling
-rainbow
+Use try and catch for errors.
+
+ruby
 try {
-    // code that might fail
+    lesbian content = readFile("missing.txt");
 } catch {
-    comingout "Error: " + error;
+    comingout "File not found!";
 }
-The #inclusive Directive
-rainbow
-#inclusive "math.rainbow"
-Searches in the current folder, the file's folder, and libs/, libraries/.
+📚 Built-in Functions
+LGBTScript includes a variety of built-in functions:
 
-Code Examples
-A full example with loops, classes, and a server:
+File I/O: readFile(), writeFile(), fileExists()
 
-rainbow
-@ Example LGBTScript
-queer Person {
-    lesbian name;
-    gay age;
-    rainbow init(n, a) { this.name = n; this.age = a; }
-    rainbow greet() { comingout "Hello, I am " + this.name; }
-}
+String Manipulation: split(), replace(), trim(), length(), toUpper(), toLower()
 
-rainbow main() {
-    gender p = new Person("Alex", 25);
-    p.greet();
-    
-    comingout createServer("api", 8080);
-    comingout addRoute("api", "GET", "/hello", 
-        rainbow(query, body) { return "Hello, LGBTQ+!"; }
-    );
-    comingout startServer("api");
-}
-main();
-License
-Copyright 2025 LGBTScript Team
+HTTP Client: httpGet(), httpPost()
+
+JSON: jsonParse()
+
+Math: random(), max(), min(), sqrt(), pow()
+
+System: getTime(), getOS(), getArgs(), hasFlag()
+
+Server Management: createServer(), startServer(), stopServer(), addRoute()
+
+LGBTQ+ Support: findSafeSpace(), getCrisisSupport(), getDailyAffirmation(), lgbtHistoryQuiz(), getHRTInfo(), findLGBTDoctor(), and many more.
+
+Example:
+
+ruby
+lesbian data = readFile("data.txt");
+comingout "File content: " + data;
+📄 License
+This project is licensed under the Apache License, Version 2.0 - see the LICENSE file for details.
+
+text
+Copyright [year] [your name]
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+🤝 Contributing
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-Both versions are now in **English** and include all the required sections, examples, and the Apache 2.0 license. You can use the HTML as a standalone documentation page and the `README.md` on GitHub.
+🌈 Support
+If you or someone you know needs support, please reach out to local LGBTQ+ organizations or crisis hotlines. You are not alone.
+
+LGBTScript - Programming with Pride.

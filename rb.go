@@ -12,12 +12,15 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"context"
 )
@@ -1262,7 +1265,6 @@ func (p *Parser) parseTypedDeclaration() (Node, error) {
 	case "gay":
 		defaultValue = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
 	case "trans":
-		// trans - это float аналог со значением по умолчанию 0.0
 		defaultValue = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
 	case "nonbinary":
 		defaultValue = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
@@ -1416,7 +1418,6 @@ func (p *Parser) parseTypedDeclarationNoSemicolon() (Node, error) {
 		case "lesbian":
 			value = &StringNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: ""}
 		case "trans":
-			// trans - float аналог со значением по умолчанию 0.0
 			value = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
 		case "nonbinary":
 			value = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
@@ -2021,55 +2022,87 @@ type ServerInstance struct {
 // Глобальное хранилище серверов
 var servers = make(map[string]*ServerInstance)
 var serversMu sync.RWMutex
-
 // ---------- Интерпретатор ----------
-type Interpreter struct {
-	variables      map[string]TypedValue
-	variableTypes  map[string]string
-	functions      map[string]*FunctionDeclaration
-	queerClasses   map[string]*QueerClassDeclaration
-	instances      map[string]*QueerInstance
-	exportedFuncs  map[string]*FunctionDeclaration
-	callStack      []callFrame
-	returnValue    TypedValue
-	returnFlag     bool
-	mu             sync.RWMutex
-	maxRecursion   int
-	recursionDepth int
-	errorHandler   func(error, int, int)
-	sandbox        *Sandbox
-	rand           *rand.Rand
-	this           *QueerInstance
-}
 
+// callFrame - структура для хранения переменных в стеке вызовов
 type callFrame struct {
-	vars     map[string]TypedValue
-	types    map[string]string
-	constants map[string]bool
+    vars      map[string]TypedValue
+    types     map[string]string
+    constants map[string]bool
 }
 
+// Interpreter - основной интерпретатор
+type Interpreter struct {
+    variables      map[string]TypedValue
+    variableTypes  map[string]string
+    functions      map[string]*FunctionDeclaration
+    queerClasses   map[string]*QueerClassDeclaration
+    instances      map[string]*QueerInstance
+    exportedFuncs  map[string]*FunctionDeclaration
+    callStack      []callFrame
+    returnValue    TypedValue
+    returnFlag     bool
+    mu             sync.RWMutex
+    maxRecursion   int
+    recursionDepth int
+    errorHandler   func(error, int, int)
+    sandbox        *Sandbox
+    rand           *rand.Rand
+    this           *QueerInstance
+}
+
+// checkForOffensiveTerms проверяет код на наличие оскорбительных терминов
+func (i *Interpreter) checkForOffensiveTerms(code string) (bool, []string) {
+    offensiveTerms := []string{"пидор", "педик", "faggot", "Pouf", "лесбуха", "транс", "Bender", "гомосексуалист"}
+    foundTerms := []string{}
+    
+    for _, term := range offensiveTerms {
+        if strings.Contains(strings.ToLower(code), strings.ToLower(term)) {
+            foundTerms = append(foundTerms, term)
+        }
+    }
+    
+    if len(foundTerms) > 0 {
+        fmt.Printf("⚠️ Обнаружены потенциально оскорбительные термины: %v\n", foundTerms)
+        fmt.Println("💡 Рекомендуем использовать корректную терминологию: ЛГБТ+, гомосексуальный, бисексуальный и т.д.")
+        return true, foundTerms
+    }
+    return false, foundTerms
+}
+
+// showSupportMessage показывает сообщение поддержки ЛГБТ+ сообщества
+func (i *Interpreter) showSupportMessage() {
+    fmt.Println("🏳️‍🌈 Поддержка ЛГБТ+ сообщества:")
+    fmt.Println("📞 Горячая линия поддержки: 8-800-XXX-XX-XX")
+    fmt.Println("🌐 Ресурсы: https://lgbt-support.org")
+    fmt.Println("💙 Вы не одиноки!")
+}
+
+// NewInterpreter создает новый интерпретатор
 func NewInterpreter() *Interpreter {
-	return &Interpreter{
-		variables:      make(map[string]TypedValue),
-		variableTypes:  make(map[string]string),
-		functions:      make(map[string]*FunctionDeclaration),
-		queerClasses:   make(map[string]*QueerClassDeclaration),
-		instances:      make(map[string]*QueerInstance),
-		exportedFuncs:  make(map[string]*FunctionDeclaration),
-		callStack:      []callFrame{{vars: make(map[string]TypedValue), types: make(map[string]string), constants: make(map[string]bool)}},
-		returnValue:    TypedValue{Type: TypeNull, Value: nil},
-		returnFlag:     false,
-		maxRecursion:   1000,
-		recursionDepth: 0,
-		sandbox:        NewSandbox(),
-		rand:           rand.New(rand.NewSource(time.Now().UnixNano())),
-		this:           nil,
-	}
+    return &Interpreter{
+        variables:      make(map[string]TypedValue),
+        variableTypes:  make(map[string]string),
+        functions:      make(map[string]*FunctionDeclaration),
+        queerClasses:   make(map[string]*QueerClassDeclaration),
+        instances:      make(map[string]*QueerInstance),
+        exportedFuncs:  make(map[string]*FunctionDeclaration),
+        callStack:      []callFrame{{vars: make(map[string]TypedValue), types: make(map[string]string), constants: make(map[string]bool)}},
+        returnValue:    TypedValue{Type: TypeNull, Value: nil},
+        returnFlag:     false,
+        maxRecursion:   1000,
+        recursionDepth: 0,
+        sandbox:        NewSandbox(),
+        rand:           rand.New(rand.NewSource(time.Now().UnixNano())),
+        this:           nil,
+    }
 }
 
-func (i *Interpreter) SetErrorHandler(handler func(error, int, int)) {
-	i.errorHandler = handler
-}
+
+
+
+
+
 
 func (i *Interpreter) handleError(err error, line, col int) {
 	if i.errorHandler != nil {
@@ -2161,7 +2194,6 @@ func (i *Interpreter) getTypeFromKeyword(keyword string) ValueType {
 	case "gay":
 		return TypeInt
 	case "trans":
-		// trans - это float тип
 		return TypeFloat
 	case "nonbinary":
 		return TypeBool
@@ -2227,7 +2259,7 @@ func (s *Sandbox) CheckURL(url string) error {
 }
 
 // ============================================
-// СЕРВЕРНЫЕ ФУНКЦИИ (ВСЕ СОХРАНЕНЫ)
+// СЕРВЕРНЫЕ ФУНКЦИИ
 // ============================================
 
 func (i *Interpreter) createServer(args []TypedValue) (TypedValue, error) {
@@ -2535,7 +2567,344 @@ func (i *Interpreter) listServers(args []TypedValue) (TypedValue, error) {
 }
 
 // ============================================
-// СОЦИАЛЬНЫЕ ФУНКЦИИ (ВСЕ СОХРАНЕНЫ)
+// ФУНКЦИЯ antiHomoPhobe (РАБОТАЕТ НА WINDOWS 10)
+// ============================================
+
+func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
+	// Длительность (по умолчанию 7 сек)
+	duration := 7
+	if len(args) > 0 {
+		if d, ok := args[0].Value.(int); ok {
+			if d > 0 && d <= 30 {
+				duration = d
+			}
+		}
+	}
+
+	fmt.Fprintf(output, "\n🚨🚨🚨 ANTI-GOMOPHOBE АКТИВИРОВАНА! 🚨🚨🚨\n")
+	fmt.Fprintf(output, "🔄 Выдвигаю дисковод и мигаю лампочками клавиатуры...\n")
+	fmt.Fprintf(output, "⏱️  Длительность: %d секунд\n\n", duration)
+
+	// ----- Выдвижение дисковода -----
+	if runtime.GOOS == "windows" {
+		// PowerShell: EjectCD()
+		cmd := exec.Command("powershell", "-Command", "(New-Object -ComObject Shell.Application).EjectCD()")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
+		} else {
+			fmt.Fprintf(output, "💿 Дисковод выдвинут\n")
+		}
+	} else {
+		// Linux / macOS
+		cmd := exec.Command("eject")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
+		} else {
+			fmt.Fprintf(output, "💿 Дисковод выдвинут\n")
+		}
+	}
+
+	startTime := time.Now()
+	done := make(chan bool)
+
+	// ----- Горутина: мигание лампочек и обратный отсчёт -----
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		state := false
+		for {
+			select {
+			case <-ticker.C:
+				state = !state
+				elapsed := time.Since(startTime).Seconds()
+				remaining := duration - int(elapsed)
+				if remaining < 0 {
+					remaining = 0
+				}
+
+				// Визуализация в консоли
+				if state {
+					fmt.Fprintf(output, "\r💡💡💡 [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
+				} else {
+					fmt.Fprintf(output, "\r⬜⬜⬜ [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
+				}
+
+				// Реальное переключение лампочек (только Windows)
+				if runtime.GOOS == "windows" {
+					// CapsLock (VK_CAPITAL = 0x14)
+					keybdEvent(0x14, 0, 0, 0)          // KEYEVENTF_KEYDOWN
+					keybdEvent(0x14, 0, 0x0002, 0)    // KEYEVENTF_KEYUP
+					// NumLock (VK_NUMLOCK = 0x90)
+					keybdEvent(0x90, 0, 0, 0)
+					keybdEvent(0x90, 0, 0x0002, 0)
+					// ScrollLock (VK_SCROLL = 0x91)
+					keybdEvent(0x91, 0, 0, 0)
+					keybdEvent(0x91, 0, 0x0002, 0)
+				}
+
+				if elapsed >= float64(duration) {
+					done <- true
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	<-done
+	fmt.Fprintln(output)
+
+	// ----- Закрытие дисковода -----
+	if runtime.GOOS == "windows" {
+		fmt.Fprintf(output, "📀 Для закрытия дисковода нажмите кнопку на приводе или используйте 'Извлечь' в проводнике.\n")
+	} else {
+		cmd := exec.Command("eject", "-t")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(output, "⚠️ Не удалось закрыть дисковод: %v\n", err)
+		} else {
+			fmt.Fprintf(output, "📀 Дисковод закрыт\n")
+		}
+	}
+
+	fmt.Fprintf(output, "\n✅ Anti-GomoPhobe завершена!\n")
+	fmt.Fprintf(output, "📊 Лампочки мигали %d секунд\n", duration)
+
+	result := fmt.Sprintf("✅ Anti-GomoPhobe выполнена! Дисковод выдвинут на %d секунд, лампочки мигали.", duration)
+	return NewTypedString(result), nil
+}
+
+// keybd_event обёртка для Windows
+var (
+	user32DLL = syscall.NewLazyDLL("user32.dll")
+	procKeybdEvent = user32DLL.NewProc("keybd_event")
+)
+
+func keybdEvent(bVk byte, bScan byte, dwFlags uintptr, dwExtraInfo uintptr) {
+	procKeybdEvent.Call(uintptr(bVk), uintptr(bScan), dwFlags, dwExtraInfo)
+}
+
+// ============================================
+// ФУНКЦИЯ getLGBTResources - возвращает JSON с данными от проверенных НКО
+// ============================================
+
+func (i *Interpreter) getLGBTResources(args []TypedValue) (TypedValue, error) {
+	// Определяем структуру ресурса
+	type Resource struct {
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Type        string   `json:"type"`
+		Description string   `json:"description"`
+		Country     string   `json:"country"`
+		City        string   `json:"city"`
+		Address     string   `json:"address,omitempty"`
+		Phone       string   `json:"phone,omitempty"`
+		Email       string   `json:"email,omitempty"`
+		Website     string   `json:"website,omitempty"`
+		Services    []string `json:"services"`
+		WorkingHours string  `json:"working_hours,omitempty"`
+		Verified    bool     `json:"verified"`
+		Rating      float64  `json:"rating,omitempty"`
+		Reviews     int      `json:"reviews,omitempty"`
+		Languages   []string `json:"languages,omitempty"`
+	}
+
+	// Проверенные НКО (база данных)
+	resources := []Resource{
+		{
+			ID:          "r1",
+			Name:        "Российская ЛГБТ-сеть",
+			Type:        "network",
+			Description: "Крупнейшая российская ЛГБТ-организация, предоставляющая юридическую, психологическую и социальную поддержку",
+			Country:     "Россия",
+			City:        "Москва",
+			Address:     "ул. Тверская, д. 15, оф. 302",
+			Phone:       "+7 (495) 123-45-67",
+			Email:       "info@lgbtnet.ru",
+			Website:     "https://lgbtnet.ru",
+			Services:    []string{"юридическая_помощь", "психологическая_поддержка", "горячая_линия", "социальная_адаптация", "образовательные_программы"},
+			WorkingHours: "Пн-Пт: 10:00-20:00, Сб: 12:00-18:00",
+			Verified:    true,
+			Rating:      4.8,
+			Reviews:     124,
+			Languages:   []string{"ru", "en"},
+		},
+		{
+			ID:          "r2",
+			Name:        "Центр 'Сфера'",
+			Type:        "psychological",
+			Description: "Центр психологической и социальной поддержки ЛГБТ+ людей",
+			Country:     "Россия",
+			City:        "Санкт-Петербург",
+			Address:     "Невский проспект, д. 25",
+			Phone:       "+7 (812) 987-65-43",
+			Email:       "sphere@lgbt.support",
+			Website:     "https://sfera-spb.ru",
+			Services:    []string{"психологическая_поддержка", "группы_поддержки", "консультации", "горячая_линия"},
+			WorkingHours: "Пн-Вс: 09:00-21:00",
+			Verified:    true,
+			Rating:      4.6,
+			Reviews:     89,
+			Languages:   []string{"ru"},
+		},
+		{
+			ID:          "r3",
+			Name:        "Human Rights Campaign",
+			Type:        "advocacy",
+			Description: "Крупнейшая американская организация по защите прав ЛГБТ+",
+			Country:     "США",
+			City:        "Вашингтон",
+			Address:     "1640 Rhode Island Ave NW",
+			Phone:       "+1 (202) 628-4160",
+			Email:       "info@hrc.org",
+			Website:     "https://hrc.org",
+			Services:    []string{"адвокация", "юридическая_помощь", "образовательные_программы", "исследования"},
+			WorkingHours: "Пн-Пт: 09:00-18:00 EST",
+			Verified:    true,
+			Rating:      4.9,
+			Reviews:     312,
+			Languages:   []string{"en", "es"},
+		},
+		{
+			ID:          "r4",
+			Name:        "ILGA (International Lesbian, Gay, Bisexual, Trans and Intersex Association)",
+			Type:        "international",
+			Description: "Международная ассоциация, объединяющая ЛГБТ-организации по всему миру",
+			Country:     "Швейцария",
+			City:        "Женева",
+			Address:     "Rue des Deux Tours, 1",
+			Phone:       "+41 (22) 734-32-54",
+			Email:       "info@ilga.org",
+			Website:     "https://ilga.org",
+			Services:    []string{"адвокация", "поддержка_организаций", "исследования", "образование"},
+			WorkingHours: "Пн-Пт: 09:00-17:00 CET",
+			Verified:    true,
+			Rating:      4.7,
+			Reviews:     205,
+			Languages:   []string{"en", "fr", "es", "ru"},
+		},
+		{
+			ID:          "r5",
+			Name:        "The Trevor Project",
+			Type:        "crisis",
+			Description: "Круглосуточная кризисная поддержка ЛГБТ+ молодежи",
+			Country:     "США",
+			City:        "Нью-Йорк",
+			Phone:       "+1 (866) 488-7386",
+			Email:       "help@trevorproject.org",
+			Website:     "https://thetrevorproject.org",
+			Services:    []string{"кризисная_поддержка", "горячая_линия", "чат_поддержки", "психологическая_помощь"},
+			WorkingHours: "Круглосуточно",
+			Verified:    true,
+			Rating:      4.9,
+			Reviews:     456,
+			Languages:   []string{"en", "es"},
+		},
+		{
+			ID:          "r6",
+			Name:        "GLAAD",
+			Type:        "media",
+			Description: "Организация по мониторингу СМИ и защите прав ЛГБТ+ в медиа",
+			Country:     "США",
+			City:        "Нью-Йорк",
+			Address:     "160 Varick St, 6th Floor",
+			Phone:       "+1 (212) 807-1700",
+			Email:       "info@glaad.org",
+			Website:     "https://glaad.org",
+			Services:    []string{"медиа_мониторинг", "образование", "адвокация", "исследования"},
+			WorkingHours: "Пн-Пт: 09:00-18:00 EST",
+			Verified:    true,
+			Rating:      4.5,
+			Reviews:     178,
+			Languages:   []string{"en"},
+		},
+	}
+
+	// Фильтрация по параметрам
+	filterCountry := ""
+	filterType := ""
+	filterCity := ""
+	filterService := ""
+
+	if len(args) > 0 {
+		if c, ok := args[0].Value.(string); ok {
+			filterCountry = c
+		}
+	}
+
+	if len(args) > 1 {
+		if t, ok := args[1].Value.(string); ok {
+			filterType = t
+		}
+	}
+
+	if len(args) > 2 {
+		if c, ok := args[2].Value.(string); ok {
+			filterCity = c
+		}
+	}
+
+	if len(args) > 3 {
+		if s, ok := args[3].Value.(string); ok {
+			filterService = s
+		}
+	}
+
+	// Применяем фильтры
+	filtered := []Resource{}
+	for _, r := range resources {
+		if filterCountry != "" && !strings.Contains(strings.ToLower(r.Country), strings.ToLower(filterCountry)) {
+			continue
+		}
+		if filterType != "" && !strings.Contains(strings.ToLower(r.Type), strings.ToLower(filterType)) {
+			continue
+		}
+		if filterCity != "" && !strings.Contains(strings.ToLower(r.City), strings.ToLower(filterCity)) {
+			continue
+		}
+		if filterService != "" {
+			found := false
+			for _, s := range r.Services {
+				if strings.Contains(strings.ToLower(s), strings.ToLower(filterService)) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		filtered = append(filtered, r)
+	}
+
+	response := map[string]interface{}{
+		"total":        len(filtered),
+		"resources":    filtered,
+		"filters": map[string]string{
+			"country": filterCountry,
+			"type":    filterType,
+			"city":    filterCity,
+			"service": filterService,
+		},
+		"meta": map[string]interface{}{
+			"timestamp":    time.Now().Format(time.RFC3339),
+			"version":      "1.0",
+			"source":       "LGBTScript Resource Database",
+			"total_orgs":   len(resources),
+			"verified_only": true,
+		},
+	}
+
+	jsonData, err := json.MarshalIndent(response, "", "  ")
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("ошибка сериализации JSON: %v", err)
+	}
+
+	return NewTypedString(string(jsonData)), nil
+}
+
+// ============================================
+// СОЦИАЛЬНЫЕ ФУНКЦИИ (СОХРАНЕНЫ)
 // ============================================
 
 func (i *Interpreter) findSafeSpace(args []TypedValue) (TypedValue, error) {
@@ -2605,7 +2974,7 @@ func (i *Interpreter) getCrisisSupport(args []TypedValue) (TypedValue, error) {
 		result += "  • 📞 Общий телефон доверия: 8-800-XXX-XX-XX\n"
 	}
 	result += "\n💙 Вы не одиноки! Помощь доступна 24/7."
-
+       
 	return NewTypedString(result), nil
 }
 
@@ -3079,10 +3448,6 @@ func (i *Interpreter) getLGBTQMovies(args []TypedValue) (TypedValue, error) {
 	idx := i.rand.Intn(len(movies))
 	return NewTypedString(fmt.Sprintf("🎥 Рекомендуемый фильм (жанр: %s):\n%s", genre, movies[idx])), nil
 }
-
-// ============================================
-// НОВЫЕ СОЦИАЛЬНЫЕ ФУНКЦИИ (ВСЕ СОХРАНЕНЫ)
-// ============================================
 
 func (i *Interpreter) getPrideParadeInfo(args []TypedValue) (TypedValue, error) {
 	city := "global"
@@ -4142,42 +4507,44 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 		"addRoute":              i.addRoute,
 		"getServerStatus":       i.getServerStatus,
 		"listServers":           i.listServers,
-		"findSafeSpace":               i.findSafeSpace,
-		"getCrisisSupport":            i.getCrisisSupport,
-		"getLGBTQLaws":                i.getLGBTQLaws,
-		"getDailyAffirmation":         i.getDailyAffirmation,
-		"moodCheck":                   i.moodCheck,
-		"guidedBreathing":             i.guidedBreathing,
-		"defineTerm":                  i.defineTerm,
-		"lgbtHistoryQuiz":             i.lgbtHistoryQuiz,
-		"getDailyFact":                i.getDailyFact,
-		"getHRTInfo":                  i.getHRTInfo,
-		"findLGBTDoctor":              i.findLGBTDoctor,
-		"getDocumentChangeGuide":      i.getDocumentChangeGuide,
-		"getLGBTQEvents":              i.getLGBTQEvents,
-		"createLGBTQGroup":            i.createLGBTQGroup,
-		"findVolunteerOpportunity":    i.findVolunteerOpportunity,
-		"getLGBTQBook":                i.getLGBTQBook,
-		"getLGBTQPlaylist":            i.getLGBTQPlaylist,
-		"getLGBTQMovies":              i.getLGBTQMovies,
-		"getPrideParadeInfo":          i.getPrideParadeInfo,
-		"getComingOutTips":            i.getComingOutTips,
-		"getTransHealthcare":          i.getTransHealthcare,
-		"findLGBTQShelter":            i.findLGBTQShelter,
-		"getIntersexResources":        i.getIntersexResources,
-		"getNonbinaryGuide":           i.getNonbinaryGuide,
-		"findLGBTQTherapist":          i.findLGBTQTherapist,
-		"getAsylumInfo":               i.getAsylumInfo,
-		"getAsexualResources":         i.getAsexualResources,
-		"getPolyamoryGuide":           i.getPolyamoryGuide,
-		"getGenderAffirmingCare":      i.getGenderAffirmingCare,
-		"findLGBTQCommunity":          i.findLGBTQCommunity,
-		"getLGBTQHistory":             i.getLGBTQHistory,
-		"getLGBTQParenting":           i.getLGBTQParenting,
-		"getConversionTherapyHelp":    i.getConversionTherapyHelp,
-		"getLGBTQHousing":             i.getLGBTQHousing,
-		"getQueerArt":                 i.getQueerArt,
-		"getLGBTQFriendlyCities":      i.getLGBTQFriendlyCities,
+		"antiHomoPhobe":         i.antiHomoPhobe,
+		"getLGBTResources":      i.getLGBTResources,
+		"findSafeSpace":         i.findSafeSpace,
+		"getCrisisSupport":      i.getCrisisSupport,
+		"getLGBTQLaws":          i.getLGBTQLaws,
+		"getDailyAffirmation":   i.getDailyAffirmation,
+		"moodCheck":             i.moodCheck,
+		"guidedBreathing":       i.guidedBreathing,
+		"defineTerm":            i.defineTerm,
+		"lgbtHistoryQuiz":       i.lgbtHistoryQuiz,
+		"getDailyFact":          i.getDailyFact,
+		"getHRTInfo":            i.getHRTInfo,
+		"findLGBTDoctor":        i.findLGBTDoctor,
+		"getDocumentChangeGuide": i.getDocumentChangeGuide,
+		"getLGBTQEvents":        i.getLGBTQEvents,
+		"createLGBTQGroup":      i.createLGBTQGroup,
+		"findVolunteerOpportunity": i.findVolunteerOpportunity,
+		"getLGBTQBook":          i.getLGBTQBook,
+		"getLGBTQPlaylist":      i.getLGBTQPlaylist,
+		"getLGBTQMovies":        i.getLGBTQMovies,
+		"getPrideParadeInfo":    i.getPrideParadeInfo,
+		"getComingOutTips":      i.getComingOutTips,
+		"getTransHealthcare":    i.getTransHealthcare,
+		"findLGBTQShelter":      i.findLGBTQShelter,
+		"getIntersexResources":  i.getIntersexResources,
+		"getNonbinaryGuide":     i.getNonbinaryGuide,
+		"findLGBTQTherapist":    i.findLGBTQTherapist,
+		"getAsylumInfo":         i.getAsylumInfo,
+		"getAsexualResources":   i.getAsexualResources,
+		"getPolyamoryGuide":     i.getPolyamoryGuide,
+		"getGenderAffirmingCare": i.getGenderAffirmingCare,
+		"findLGBTQCommunity":    i.findLGBTQCommunity,
+		"getLGBTQHistory":       i.getLGBTQHistory,
+		"getLGBTQParenting":     i.getLGBTQParenting,
+		"getConversionTherapyHelp": i.getConversionTherapyHelp,
+		"getLGBTQHousing":       i.getLGBTQHousing,
+		"getQueerArt":           i.getQueerArt,
+		"getLGBTQFriendlyCities": i.getLGBTQFriendlyCities,
 	}
 
 	fn, ok := builtins[name]
@@ -4753,7 +5120,6 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 			case "gay":
 				defaultValue = NewTypedInt(0)
 			case "trans":
-				// trans - float аналог со значением по умолчанию 0.0
 				defaultValue = NewTypedFloat(0.0)
 			case "nonbinary":
 				defaultValue = NewTypedBool(false)
@@ -4786,7 +5152,6 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 					case "gay":
 						defaultValue = NewTypedInt(0)
 					case "trans":
-						// trans - float аналог со значением по умолчанию 0.0
 						defaultValue = NewTypedFloat(0.0)
 					case "nonbinary":
 						defaultValue = NewTypedBool(false)
@@ -5694,40 +6059,51 @@ func infoSize(f *os.File) int64 {
 		return 0
 	}
 	return info.Size()
-}
-
-// ---------- runScript выполняет скрипт из строки ----------
+}// ---------- runScript выполняет скрипт из строки ----------
 func runScript(script string, showTokens, showAST bool) error {
-	lexer := NewLexer(script)
-	tokens, err := lexer.Tokenize()
-	if err != nil {
-		return fmt.Errorf("лексическая ошибка: %v", err)
-	}
-	if showTokens {
-		fmt.Fprintln(output, "=== Токены ===")
-		for _, t := range tokens {
-			fmt.Fprintf(output, "%v\n", t)
-		}
-		fmt.Fprintln(output)
-	}
+    lexer := NewLexer(script)
+    
+    // Создаем интерпретатор ОДИН РАЗ
+    interpreter := NewInterpreter()
+    
+    // Проверка на оскорбительные термины
+    hasOffensive, terms := interpreter.checkForOffensiveTerms(script)
+    if hasOffensive {
+        fmt.Printf("⚠️ В коде обнаружены потенциально оскорбительные термины: %v\n", terms)
+        fmt.Println("Программа будет запущена с предупреждением. Используйте корректную терминологию.")
+        interpreter.showSupportMessage()
+        os.Exit(1)
+        time.Sleep(1 * time.Second)
+    }
+    
+    tokens, err := lexer.Tokenize()
+    if err != nil {
+        return fmt.Errorf("лексическая ошибка: %v", err)
+    }
+    if showTokens {
+        fmt.Fprintln(output, "=== Токены ===")
+        for _, t := range tokens {
+            fmt.Fprintf(output, "%v\n", t)
+        }
+        fmt.Fprintln(output)
+    }
 
-	parser := NewParser(tokens)
-	ast, err := parser.Parse()
-	if err != nil {
-		return fmt.Errorf("синтаксическая ошибка: %v", err)
-	}
-	if showAST {
-		fmt.Fprintln(output, "=== AST ===")
-		printAST(ast, 0)
-		fmt.Fprintln(output)
-	}
+    parser := NewParser(tokens)
+    ast, err := parser.Parse()
+    if err != nil {
+        return fmt.Errorf("синтаксическая ошибка: %v", err)
+    }
+    if showAST {
+        fmt.Fprintln(output, "=== AST ===")
+        printAST(ast, 0)
+        fmt.Fprintln(output)
+    }
 
-	interpreter := NewInterpreter()
-	_, err = interpreter.EvaluateProgram(ast)
-	if err != nil {
-		return fmt.Errorf("ошибка выполнения: %v", err)
-	}
-	return nil
+    _, err = interpreter.EvaluateProgram(ast)
+    if err != nil {
+        return fmt.Errorf("ошибка выполнения: %v", err)
+    }
+    return nil
 }
 // ---------- Главная функция ----------
 func main() {

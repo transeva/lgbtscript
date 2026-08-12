@@ -1,11 +1,5 @@
 ﻿;===============================================================================
-; LGBTScript IDE v9.0 "Pride Edition" - Visual Studio Code стиль
-;  - Тёмная фиолетовая тема как в VS Code
-;  - Без горизонтальной прокрутки (перенос строк)
-;  - Лексерная подсветка LGBTScript 
-;  - Асинхронная обработка больших файлов
-;===============================================================================
-
+; LGBTScript IDE v9.0 "Pride Edition" 
 EnableExplicit
 
 CompilerIf #PB_Compiler_OS = #PB_OS_Windows
@@ -484,7 +478,7 @@ Procedure CollectDeclarations()
       w$ = ReadWord2(wStart, pos - wStart)
 
       Select LCase(w$)
-        Case "gay", "lesbian", "trans", "nonbinary", "gender", "queer", "homo"
+        Case "gay", "lesbian", "trans", "nonbinary", "gender", "queer", "homo", "asexual"
           pending = 2
         Case "rainbow"
           pending = 2
@@ -514,9 +508,9 @@ Procedure.i WordStyle(w$, nextIsParen)
   Select lw$
     Case "gay"
       ProcedureReturn #STYLE_KEYWORD_GAY
-    Case "lesbian", "cis", "nocis", "trans"
+    Case "lesbian", "cis", "nocis", "trans", "sex"
       ProcedureReturn #STYLE_KEYWORD_LESBIAN
-    Case "gender"
+    Case "gender", "asexual"
       ProcedureReturn #STYLE_KEYWORD_GENDER
        Case "homo"
       ProcedureReturn #STYLE_KEYWORD_GAY
@@ -1542,9 +1536,7 @@ Procedure DoCommand(cmd)
 
     Case #CMD_ABOUT
       MessageRequester("О программе",
-        "LGBTScript IDE v9.0" + #LF$ +
-        "Основано на Visual Studio Code Dark+ теме" + #LF$ +
-        "ЛГБТ-акценты в стиле Pride")
+        "LGBTScript IDE v9.0")
   EndSelect
 EndProcedure
 
@@ -1724,10 +1716,10 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   If *TextBuf : FreeMemory(*TextBuf) : EndIf
 EndIf
 ; IDE Options = PureBasic 6.21 (Windows - x64)
-; CursorPosition = 349
-; FirstLine = 326
+; CursorPosition = 1538
+; FirstLine = 1536
 ; Folding = --------------
 ; EnableXP
 ; DPIAware
-; UseIcon = ..\..\LGBTScript\ico.ico
-; Executable = ..\bin\LGBTScript IDE.exe
+; UseIcon = ..\LGBTScript\ico.ico
+; Executable = LGBTScript IDE.exe

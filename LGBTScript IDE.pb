@@ -1749,7 +1749,7 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
     MenuTitle("Запуск")
       MenuItem(#CMD_RUN,   "Выполнить" + Chr(9) + "F5")
       MenuItem(#CMD_COMPILE, "Создать исполняемый файл")  ; Добавлен пункт меню
-      MenuItem(12345,   "Cоздать исполняемый файл")
+     
       MenuItem(#CMD_CLEAR, "Очистить лог")
     MenuTitle("Справка")
       MenuItem(#CMD_ABOUT, "О программе")
@@ -1889,8 +1889,8 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   If *TextBuf : FreeMemory(*TextBuf) : EndIf
 EndIf
 ; IDE Options = PureBasic 6.21 (Windows - x64)
-; CursorPosition = 1889
-; FirstLine = 1866
+; CursorPosition = 1754
+; FirstLine = 1747
 ; Folding = --------------
 ; EnableXP
 ; DPIAware

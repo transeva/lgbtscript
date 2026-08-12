@@ -1262,6 +1262,7 @@ func (p *Parser) parseTypedDeclaration() (Node, error) {
 	case "gay":
 		defaultValue = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
 	case "trans":
+		// trans - это float аналог со значением по умолчанию 0.0
 		defaultValue = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
 	case "nonbinary":
 		defaultValue = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
@@ -1415,6 +1416,7 @@ func (p *Parser) parseTypedDeclarationNoSemicolon() (Node, error) {
 		case "lesbian":
 			value = &StringNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: ""}
 		case "trans":
+			// trans - float аналог со значением по умолчанию 0.0
 			value = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
 		case "nonbinary":
 			value = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
@@ -2159,6 +2161,7 @@ func (i *Interpreter) getTypeFromKeyword(keyword string) ValueType {
 	case "gay":
 		return TypeInt
 	case "trans":
+		// trans - это float тип
 		return TypeFloat
 	case "nonbinary":
 		return TypeBool
@@ -4750,6 +4753,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 			case "gay":
 				defaultValue = NewTypedInt(0)
 			case "trans":
+				// trans - float аналог со значением по умолчанию 0.0
 				defaultValue = NewTypedFloat(0.0)
 			case "nonbinary":
 				defaultValue = NewTypedBool(false)
@@ -4782,6 +4786,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 					case "gay":
 						defaultValue = NewTypedInt(0)
 					case "trans":
+						// trans - float аналог со значением по умолчанию 0.0
 						defaultValue = NewTypedFloat(0.0)
 					case "nonbinary":
 						defaultValue = NewTypedBool(false)
@@ -5502,10 +5507,249 @@ main();
 	}
 }
 
+// ------------------------------------------------------------
+// НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: Компиляция в .exe без установки Go
+// ------------------------------------------------------------
+
+const (
+	scriptMarker = "##RB_SCRIPT_START##"
+	markerSize   = len(scriptMarker)
+	readBufSize  = 4096
+)
+
+// isEmbeddedScript проверяет, содержит ли текущий исполняемый файл встроенный скрипт
+func isEmbeddedScript() bool {
+	exePath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	file, err := os.Open(exePath)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	if info.Size() < int64(markerSize) {
+		return false
+	}
+
+	// Ищем маркер с конца файла (с запасом 1 МБ)
+	searchSize := int64(1024 * 1024)
+	if searchSize > info.Size() {
+		searchSize = info.Size()
+	}
+	start := info.Size() - searchSize
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, readBufSize)
+	pos := start
+	for pos < info.Size() {
+		toRead := readBufSize
+		if pos+int64(toRead) > info.Size() {
+			toRead = int(info.Size() - pos)
+		}
+		n, err := file.ReadAt(buf[:toRead], pos)
+		if err != nil && err != io.EOF {
+			return false
+		}
+		if n > 0 {
+			if strings.Contains(string(buf[:n]), scriptMarker) {
+				return true
+			}
+		}
+		pos += int64(n)
+	}
+	return false
+}
+
+// getEmbeddedScript извлекает встроенный скрипт из исполняемого файла
+func getEmbeddedScript() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(exePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	// Ищем маркер с конца
+	markerPos := int64(-1)
+	searchSize := int64(1024 * 1024)
+	if searchSize > info.Size() {
+		searchSize = info.Size()
+	}
+	start := info.Size() - searchSize
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, readBufSize)
+	pos := start
+	for pos < info.Size() {
+		toRead := readBufSize
+		if pos+int64(toRead) > info.Size() {
+			toRead = int(info.Size() - pos)
+		}
+		n, err := file.ReadAt(buf[:toRead], pos)
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		if n > 0 {
+			idx := strings.Index(string(buf[:n]), scriptMarker)
+			if idx != -1 {
+				markerPos = pos + int64(idx) + int64(markerSize)
+				break
+			}
+		}
+		pos += int64(n)
+	}
+	if markerPos == -1 {
+		return "", fmt.Errorf("script marker not found")
+	}
+
+	// Читаем оставшуюся часть после маркера
+	_, err = file.Seek(markerPos, io.SeekStart)
+	if err != nil {
+		return "", err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// createExecutable создаёт новый .exe, встраивая в него скрипт
+func createExecutable(inputScript, outputExe string) error {
+	// Проверяем входной файл
+	scriptData, err := os.ReadFile(inputScript)
+	if err != nil {
+		return fmt.Errorf("cannot read script file '%s': %v", inputScript, err)
+	}
+	if len(scriptData) == 0 {
+		return fmt.Errorf("script file '%s' is empty", inputScript)
+	}
+
+	// Получаем путь к текущему исполняемому файлу (rb.exe)
+	selfExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot get executable path: %v", err)
+	}
+
+	// Открываем текущий бинарник для чтения
+	src, err := os.Open(selfExe)
+	if err != nil {
+		return fmt.Errorf("cannot open self executable: %v", err)
+	}
+	defer src.Close()
+
+	// Создаём выходной файл
+	dst, err := os.Create(outputExe)
+	if err != nil {
+		return fmt.Errorf("cannot create output file: %v", err)
+	}
+	defer dst.Close()
+
+	// Копируем содержимое бинарника
+	_, err = io.Copy(dst, src)
+	if err != nil {
+		return fmt.Errorf("copy failed: %v", err)
+	}
+
+	// Дописываем маркер и скрипт
+	_, err = dst.Write([]byte(scriptMarker))
+	if err != nil {
+		return fmt.Errorf("write marker failed: %v", err)
+	}
+	_, err = dst.Write(scriptData)
+	if err != nil {
+		return fmt.Errorf("write script failed: %v", err)
+	}
+
+	// Устанавливаем права на выполнение (для Unix не нужно, для Windows неважно)
+	// Закрываем файл и делаем его исполняемым (на Windows это просто .exe)
+	err = dst.Sync()
+	if err != nil {
+		return fmt.Errorf("sync failed: %v", err)
+	}
+
+	fmt.Fprintf(output, "✅ Скомпилировано: %s -> %s (размер: %d байт, скрипт: %d байт)\n",
+		inputScript, outputExe, infoSize(dst), len(scriptData))
+	return nil
+}
+
+func infoSize(f *os.File) int64 {
+	info, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// ---------- runScript выполняет скрипт из строки ----------
+func runScript(script string, showTokens, showAST bool) error {
+	lexer := NewLexer(script)
+	tokens, err := lexer.Tokenize()
+	if err != nil {
+		return fmt.Errorf("лексическая ошибка: %v", err)
+	}
+	if showTokens {
+		fmt.Fprintln(output, "=== Токены ===")
+		for _, t := range tokens {
+			fmt.Fprintf(output, "%v\n", t)
+		}
+		fmt.Fprintln(output)
+	}
+
+	parser := NewParser(tokens)
+	ast, err := parser.Parse()
+	if err != nil {
+		return fmt.Errorf("синтаксическая ошибка: %v", err)
+	}
+	if showAST {
+		fmt.Fprintln(output, "=== AST ===")
+		printAST(ast, 0)
+		fmt.Fprintln(output)
+	}
+
+	interpreter := NewInterpreter()
+	_, err = interpreter.EvaluateProgram(ast)
+	if err != nil {
+		return fmt.Errorf("ошибка выполнения: %v", err)
+	}
+	return nil
+}
 // ---------- Главная функция ----------
 func main() {
 	setupConsole()
 
+	// Проверяем, не встроен ли в нас скрипт
+	if isEmbeddedScript() {
+		script, err := getEmbeddedScript()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Ошибка извлечения встроенного скрипта: %v\n", err)
+			os.Exit(1)
+		}
+		// Выполняем скрипт (без дополнительных флагов)
+		err = runScript(script, false, false)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Обычный режим работы
 	file, err := os.Create("lgbt.qiap")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Не удалось создать файл lgbt.qiap: %v\n", err)
@@ -5521,6 +5765,8 @@ func main() {
 	lgbtFile := flag.String("lgbt", "", "исполнить файл с кодом")
 	debug := flag.Bool("debug", false, "включить режим отладки")
 	example := flag.Bool("example", false, "показать пример с инкрементом и декрементом")
+	buildFlag := flag.Bool("b", false, "скомпилировать .rainbow в .exe")
+
 	flag.Parse()
 
 	debugMode = *debug
@@ -5530,57 +5776,42 @@ func main() {
 		return
 	}
 
-	if *lgbtFile != "" {
-		isFileExecution = true
-		currentFilePath = *lgbtFile
+	// Обработка флага -b (компиляция)
+	if *buildFlag {
+		args := flag.Args()
+		if len(args) != 2 {
+			fmt.Fprintf(os.Stderr, "Использование: -b <input.rainbow> <output.exe>\n")
+			fmt.Fprintf(os.Stderr, "Пример: rb.exe -b script.rainbow app.exe\n")
+			os.Exit(1)
+		}
+		inputScript := args[0]
+		outputExe := args[1]
+		err := createExecutable(inputScript, outputExe)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Ошибка компиляции: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *lgbtFile != "" {
+		isFileExecution = true
+		currentFilePath = *lgbtFile
 		data, err := os.ReadFile(*lgbtFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Ошибка чтения файла %s: %v\n", *lgbtFile, err)
 			os.Exit(1)
 		}
-		program := string(data)
-
-		lexer := NewLexer(program)
-		tokens, err := lexer.Tokenize()
+		err = runScript(string(data), *showTokens, *showAST)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Лексическая ошибка: %v\n", err)
-			os.Exit(1)
-		}
-		if *showTokens {
-			fmt.Fprintln(output, "=== Токены ===")
-			for _, t := range tokens {
-				fmt.Fprintf(output, "%v\n", t)
-			}
-			fmt.Fprintln(output)
-		}
-
-		parser := NewParser(tokens)
-		ast, err := parser.Parse()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Синтаксическая ошибка: %v\n", err)
-			os.Exit(1)
-		}
-		if *showAST {
-			fmt.Fprintln(output, "=== AST ===")
-			printAST(ast, 0)
-			fmt.Fprintln(output)
-		}
-
-		interpreter := NewInterpreter()
-		_, err = interpreter.EvaluateProgram(ast)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Ошибка выполнения: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 
 	if *command != "" {
-		interpreter := NewInterpreter()
-		err := executeCode(*command, interpreter)
+		err := executeCode(*command, NewInterpreter())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Ошибка выполнения: %v\n", err)
 			os.Exit(1)
@@ -5596,38 +5827,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Ошибка чтения файла %s: %v\n", filename, err)
 			os.Exit(1)
 		}
-		program := string(data)
-
-		lexer := NewLexer(program)
-		tokens, err := lexer.Tokenize()
+		err = runScript(string(data), *showTokens, *showAST)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Лексическая ошибка: %v\n", err)
-			os.Exit(1)
-		}
-		if *showTokens {
-			fmt.Fprintln(output, "=== Токены ===")
-			for _, t := range tokens {
-				fmt.Fprintf(output, "%v\n", t)
-			}
-			fmt.Fprintln(output)
-		}
-
-		parser := NewParser(tokens)
-		ast, err := parser.Parse()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Синтаксическая ошибка: %v\n", err)
-			os.Exit(1)
-		}
-		if *showAST {
-			fmt.Fprintln(output, "=== AST ===")
-			printAST(ast, 0)
-			fmt.Fprintln(output)
-		}
-
-		interpreter := NewInterpreter()
-		_, err = interpreter.EvaluateProgram(ast)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Ошибка выполнения: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -5636,5 +5838,6 @@ func main() {
 	fmt.Fprintln(output, "🌈 LGBTScript - Язык программирования с поддержкой ЛГБТ+ сообщества")
 	fmt.Fprintln(output, "📖 Используйте --example для демонстрации инкремента и декремента")
 	fmt.Fprintln(output, "📁 Укажите файл .rainbow для выполнения")
+	fmt.Fprintln(output, "🔧 Для компиляции в .exe используйте -b input.rainbow output.exe")
 	runExample()
 }

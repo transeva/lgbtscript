@@ -83,6 +83,7 @@ CompilerEndIf
 #CMD_REDO    = 13
 #CMD_RUN     = 20
 #CMD_CLEAR   = 21
+#CMD_COMPILE = 22       ; Новая команда для компиляции
 
 ;--- Геометрия ---------------------------------------------------------------
 #TOOLBAR_H    = 48
@@ -260,6 +261,7 @@ Declare   GotoEditorLine(lineNo)
 Declare   MarkErrorLine(lineNo)
 Declare   ClearErrorMarks()
 Declare   RunRainbow()
+Declare   CompileToExe()      ; Новая функция для компиляции
 Declare.i SaveEditorTo(File$)
 Declare   LoadFileToEditor(File$)
 Declare   LayoutUI()
@@ -903,6 +905,7 @@ Procedure InitToolbar()
   AddTB(#CMD_OPEN,    "Открыть",      #VS_BG)
   AddTB(#CMD_SAVE,    "Сохранить",    #VS_BG)
   AddTB(#CMD_RUN,     "▶ Выполнить",  #PR_GREEN)
+  AddTB(#CMD_COMPILE, "⚙ Компиляция", #PR_BLUE)  ; Новая кнопка для компиляции
   AddTB(#CMD_CLEAR,   "✕ Очистить",   #PR_RED)
   AddTB(#CMD_EXIT,    "Выход",        #PR_RED)
 EndProcedure
@@ -965,13 +968,6 @@ Procedure DrawToolbar()
     ty = TB()\y + (TB()\h - TextHeight(TB()\text$)) / 2
 
     DrawText(tx, ty, TB()\text$, fg)
-    
-    
-    
-    
-    
-    
-    
   Next
 
   StopDrawing()
@@ -1007,8 +1003,8 @@ EndProcedure
 
 Procedure SetRunEnabled(state)
   ForEach TB()
-    If TB()\cmd = #CMD_RUN
-      ;TB()\disabled = Bool(Not state)
+    If TB()\cmd = #CMD_RUN Or TB()\cmd = #CMD_COMPILE
+      TB()\disabled = Bool(Not state)
     EndIf
   Next
   DrawToolbar()
@@ -1087,6 +1083,7 @@ Procedure LayoutUI()
       Case #CMD_OPEN  : TB()\w = 80
       Case #CMD_SAVE  : TB()\w = 90
       Case #CMD_RUN   : TB()\w = 100
+      Case #CMD_COMPILE : TB()\w = 110  ; Ширина для кнопки компиляции
       Case #CMD_CLEAR : TB()\w = 90
       Case #CMD_EXIT  : TB()\w = 70
       Default         : TB()\w = 80
@@ -1312,6 +1309,177 @@ Procedure LoadFileToEditor(File$)
 EndProcedure
 
 ;===============================================================================
+; КОМПИЛЯЦИЯ В .EXE
+;===============================================================================
+Procedure CompileToExe()
+  Protected Process, out$, err$, lo$
+  Protected errCount, warnCount, exitCode
+  Protected startMs.q, elapsed.q
+  Protected params$, workDir$, target$, exeName$
+
+  ClearGadgetItems(#GAD_LOG)
+  ClearMap(LogLineTarget())
+  ClearErrorMarks()
+  LastErrCount  = 0
+  LastWarnCount = 0
+  LastExitCode  = 0
+
+  If CurrentFile$ <> ""
+    target$ = CurrentFile$
+  Else
+    target$ = GetCurrentDirectory() + "main.rainbow"
+  EndIf
+
+  ; Сохраняем файл перед компиляцией
+  If Not SaveEditorTo(target$)
+    LogError("Не удалось сохранить " + target$)
+    Status("Ошибка сохранения", 1)
+    ProcedureReturn
+  EndIf
+  LogLine("Файл сохранён: " + GetFilePart(target$), #LOG_OK)
+
+  ; Запрашиваем имя для .exe файла
+  exeName$ = SaveFileRequester("Сохранить исполняемый файл", 
+                               GetPathPart(target$) + GetFilePart(target$, #PB_FileSystem_NoExtension) + ".exe",
+                               "EXE файлы (*.exe)|*.exe|Все файлы (*.*)|*.*", 0)
+  
+  If exeName$ = ""
+    LogLine("Компиляция отменена")
+    ProcedureReturn
+  EndIf
+
+  If FileSize("rb.exe") <= 0
+    LogError("rb.exe не найден в директории: " + GetCurrentDirectory())
+    LogLine("Поместите rb.exe рядом с IDE")
+    Status("rb.exe не найден", 1)
+    ProcedureReturn
+  EndIf
+
+  workDir$ = GetCurrentDirectory()
+  params$  = "-b " + Chr(34) + target$ + Chr(34) + " " + Chr(34) + exeName$ + Chr(34)
+
+  LogLine("Команда: rb.exe " + params$)
+  LogLine("Каталог: " + workDir$)
+  LogLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  Status("Компиляция...")
+  SetRunEnabled(#False)
+
+  startMs = ElapsedMilliseconds()
+
+  Process = RunProgram("rb.exe", params$, workDir$,
+            #PB_Program_Open | #PB_Program_Read | #PB_Program_Error | #PB_Program_Hide)
+
+  If Not Process
+    CompilerIf #PB_Compiler_OS = #PB_OS_Windows
+      LogError("Не удалось запустить rb.exe. Код Windows: " + Str(GetLastError_()))
+    CompilerElse
+      LogError("Не удалось запустить rb.exe")
+    CompilerEndIf
+    LogLine("Проверьте разрядность файла и наличие зависимых DLL")
+    Status("Компиляция не удалась", 1)
+    SetRunEnabled(#True)
+    ProcedureReturn
+  EndIf
+
+  While ProgramRunning(Process)
+    While AvailableProgramOutput(Process)
+      out$ = ReadProgramString(Process)
+      If out$ <> ""
+        lo$ = LCase(out$)
+        If FindString(lo$, "error") Or FindString(lo$, "ошибка") Or
+           FindString(lo$, "fatal") Or FindString(lo$, "exception")
+          LogError(out$)
+          errCount + 1
+        ElseIf FindString(lo$, "warning") Or FindString(lo$, "предупрежд")
+          LogLine(out$, #LOG_WARN)
+          warnCount + 1
+        Else
+          LogLine(out$)
+        EndIf
+      EndIf
+    Wend
+
+    err$ = ReadProgramError(Process)
+    If err$ <> ""
+      LogError(err$)
+      errCount + 1
+    EndIf
+
+    While WindowEvent() : Wend
+    Delay(1)
+  Wend
+
+  ; Читаем оставшиеся выводы
+  While AvailableProgramOutput(Process)
+    out$ = ReadProgramString(Process)
+    If out$ <> ""
+      lo$ = LCase(out$)
+      If FindString(lo$, "error") Or FindString(lo$, "ошибка") Or
+         FindString(lo$, "fatal") Or FindString(lo$, "exception")
+        LogError(out$)
+        errCount + 1
+      ElseIf FindString(lo$, "warning") Or FindString(lo$, "предупрежд")
+        LogLine(out$, #LOG_WARN)
+        warnCount + 1
+      Else
+        LogLine(out$)
+      EndIf
+    EndIf
+  Wend
+
+  Repeat
+    err$ = ReadProgramError(Process)
+    If err$ = "" : Break : EndIf
+    LogError(err$)
+    errCount + 1
+  ForEver
+
+  exitCode = ProgramExitCode(Process)
+  CloseProgram(Process)
+
+  LastExitCode  = exitCode
+  LastErrCount  = errCount
+  LastWarnCount = warnCount
+
+  elapsed = ElapsedMilliseconds() - startMs
+  LogLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+  If exitCode = 0 And errCount = 0
+    LogLine("✅ Компиляция успешно завершена за " + Str(elapsed) + " мс", #LOG_OK)
+    LogLine("📁 Создан файл: " + exeName$, #LOG_OK)
+    Status("✅ Компиляция завершена: " + GetFilePart(exeName$), 2)
+    
+    ; Предлагаем открыть папку с файлом
+    If MessageRequester("Компиляция успешна", 
+                        "Исполняемый файл создан:" + #CRLF$ + exeName$ + #CRLF$ + #CRLF$ + 
+                        "Открыть папку с файлом?", #PB_MessageRequester_YesNo) = #PB_MessageRequester_Yes
+      CompilerIf #PB_Compiler_OS = #PB_OS_Windows
+        RunProgram("explorer.exe", "/select," + Chr(34) + exeName$ + Chr(34), "")
+      CompilerElse
+        RunProgram("open", GetPathPart(exeName$), "")
+      CompilerEndIf
+    EndIf
+  Else
+    LogError("❌ Компиляция завершилась с ошибками")
+    LogError("Код возврата: " + Str(exitCode) +
+             " | ошибок: " + Str(errCount) +
+             " | предупреждений: " + Str(warnCount) +
+             " | " + Str(elapsed) + " мс")
+    
+    Select exitCode
+      Case 1   : LogLine("Код 1: общая ошибка компиляции")
+      Case 2   : LogLine("Код 2: синтаксическая ошибка в коде")
+      Case 3   : LogLine("Код 3: файл не найден или недоступен")
+      Case 127 : LogLine("Код 127: команда не найдена")
+    EndSelect
+
+    Status("❌ Ошибок: " + Str(errCount) + "   код " + Str(exitCode), 1)
+  EndIf
+
+  SetRunEnabled(#True)
+EndProcedure
+
+;===============================================================================
 ; Запуск rb.exe
 ;===============================================================================
 Procedure RunRainbow()
@@ -1445,9 +1613,7 @@ Procedure RunRainbow()
              " | предупреждений: " + Str(warnCount) +
              " | " + Str(elapsed) + " мс")
     
-    
-    
-    SetGadgetState(#GAD_LOG, CountGadgetItems(#Gad_lOG))
+    SetGadgetState(#GAD_LOG, CountGadgetItems(#GAD_LOG))
     
     Select exitCode
       Case 1   : LogLine("Код 1: общая ошибка выполнения скрипта")
@@ -1477,11 +1643,12 @@ Procedure DoCommand(cmd)
   Protected File$
 
   Select cmd
+
     Case 1919
       SetGadgetText(#GAD_EDITOR, "")
       CurrentFile$=""
       SetWindowTitle(0, "LGBTScript IDE v9.0")
-      
+   
     Case #CMD_OPEN
       File$ = OpenFileRequester("Открыть файл", "",
               "Rainbow files (*.rainbow)|*.rainbow|All files (*.*)|*.*", 0)
@@ -1527,6 +1694,7 @@ Procedure DoCommand(cmd)
     Case #CMD_UNDO  : ScintillaSendMessage(#GAD_EDITOR, #SCI_UNDO,  0, 0)
     Case #CMD_REDO  : ScintillaSendMessage(#GAD_EDITOR, #SCI_REDO,  0, 0)
     Case #CMD_RUN   : RunRainbow()
+    Case #CMD_COMPILE : CompileToExe()  ; Обработка команды компиляции
 
     Case #CMD_CLEAR
       ClearGadgetItems(#GAD_LOG)
@@ -1580,6 +1748,8 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
       MenuItem(#CMD_REDO,  "Повторить" + Chr(9) + "Ctrl+Y")
     MenuTitle("Запуск")
       MenuItem(#CMD_RUN,   "Выполнить" + Chr(9) + "F5")
+      MenuItem(#CMD_COMPILE, "Создать исполняемый файл")  ; Добавлен пункт меню
+      MenuItem(12345,   "Cоздать исполняемый файл")
       MenuItem(#CMD_CLEAR, "Очистить лог")
     MenuTitle("Справка")
       MenuItem(#CMD_ABOUT, "О программе")
@@ -1640,10 +1810,12 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
         
       Case #PB_Event_Menu
         DoCommand(EventMenu())
-
+      
       Case #PB_Event_Gadget
         Select EventGadget()
-
+         
+            
+            
           Case #GAD_TOOLBAR
             mx = GetGadgetAttribute(#GAD_TOOLBAR, #PB_Canvas_MouseX)
             my = GetGadgetAttribute(#GAD_TOOLBAR, #PB_Canvas_MouseY)
@@ -1686,7 +1858,8 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
             If EventType() = #PB_EventType_Change
               ClearErrorMarks()
             EndIf
-
+            
+             
           Case #GAD_LOG
             If EventType() = #PB_EventType_LeftDoubleClick
               sel = GetGadgetState(#GAD_LOG)
@@ -1716,10 +1889,10 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   If *TextBuf : FreeMemory(*TextBuf) : EndIf
 EndIf
 ; IDE Options = PureBasic 6.21 (Windows - x64)
-; CursorPosition = 1538
-; FirstLine = 1536
+; CursorPosition = 1889
+; FirstLine = 1866
 ; Folding = --------------
 ; EnableXP
 ; DPIAware
-; UseIcon = ..\LGBTScript\ico.ico
+; UseIcon = ico.ico
 ; Executable = LGBTScript IDE.exe

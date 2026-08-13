@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"net/url"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
@@ -2098,12 +2099,6 @@ func NewInterpreter() *Interpreter {
     }
 }
 
-
-
-
-
-
-
 func (i *Interpreter) handleError(err error, line, col int) {
 	if i.errorHandler != nil {
 		i.errorHandler(err, line, col)
@@ -2539,7 +2534,6 @@ func (i *Interpreter) getServerStatus(args []TypedValue) (TypedValue, error) {
 	
 	return NewTypedString(result), nil
 }
-
 func (i *Interpreter) listServers(args []TypedValue) (TypedValue, error) {
 	serversMu.RLock()
 	defer serversMu.RUnlock()
@@ -2550,10 +2544,13 @@ func (i *Interpreter) listServers(args []TypedValue) (TypedValue, error) {
 	
 	result := "📋 Список серверов:\n"
 	for name, server := range servers {
-		status := "⏹️ остановлен"
+		var status string
 		if server.IsActive {
 			status = "▶️ запущен"
+		} else {
+			status = "⏹️ остановлен"
 		}
+		
 		routeCount := 0
 		server.mu.RLock()
 		for _, routes := range server.Routes {
@@ -2682,6 +2679,194 @@ var (
 
 func keybdEvent(bVk byte, bScan byte, dwFlags uintptr, dwExtraInfo uintptr) {
 	procKeybdEvent.Call(uintptr(bVk), uintptr(bScan), dwFlags, dwExtraInfo)
+}
+
+// ============================================
+// ФУНКЦИЯ lgbtImg - ИСПРАВЛЕННАЯ (НЕ ЗАВИСАЕТ)
+// ============================================
+
+func (i *Interpreter) lgbtImg(args []TypedValue) (TypedValue, error) {
+	if len(args) < 3 {
+		return TypedValue{}, fmt.Errorf("lgbtImg: expected 3 arguments (prompt, width, height), got %d", len(args))
+	}
+	
+	prompt, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("lgbtImg: first argument (prompt) must be string")
+	}
+	
+	width, ok := args[1].Value.(int)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("lgbtImg: second argument (width) must be integer")
+	}
+	
+	height, ok := args[2].Value.(int)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("lgbtImg: third argument (height) must be integer")
+	}
+	
+	if width < 1 || width > 4096 {
+		return TypedValue{}, fmt.Errorf("lgbtImg: width must be between 1 and 4096")
+	}
+	
+	if height < 1 || height > 4096 {
+		return TypedValue{}, fmt.Errorf("lgbtImg: height must be between 1 and 4096")
+	}
+	
+	// Используем текущее время
+	now := time.Now()
+	timestamp := now.UnixNano()
+	dateStr := now.Format("20060102_150405.000")
+	
+	// Массив ЛГБТ-тематик
+	lgbtThemes := []string{
+		"rainbow pride flag, LGBTQ+ community, diversity, inclusion, love",
+		"pride celebration, colorful, LGBTQ rights, equality, joy",
+		"rainbow colors, pride parade, LGBTQ+ pride, acceptance, unity",
+		"diverse LGBTQ+ people, rainbow, pride, love is love, happiness",
+		"pride flag waving, LGBTQ community, rainbow, freedom, equality",
+		"colorful pride celebration, LGBTQ+, diversity, inclusion, joy",
+	}
+	
+	styles := []string{
+		"digital art, vibrant colors, detailed, beautiful",
+		"watercolor, soft colors, artistic, dreamy",
+		"cartoon style, colorful, cute, cheerful",
+		"realistic, detailed, vibrant, stunning",
+		"abstract, colorful, modern, artistic",
+		"fantasy style, magical, colorful, dreamy",
+	}
+	
+	themeIdx := i.rand.Intn(len(lgbtThemes))
+	styleIdx := i.rand.Intn(len(styles))
+	
+	randomWords := []string{
+		"beautiful", "wonderful", "amazing", "incredible", "magnificent", 
+		"spectacular", "fantastic", "gorgeous", "stunning", "breathtaking",
+	}
+	randWord := randomWords[i.rand.Intn(len(randomWords))]
+	
+	colors := []string{"red", "orange", "yellow", "green", "blue", "purple", "pink", "gold", "silver"}
+	randColor := colors[i.rand.Intn(len(colors))]
+	
+	uniquePrompt := fmt.Sprintf("%s, %s, %s, %s, %s, %s pride, %s colors",
+		prompt,
+		lgbtThemes[themeIdx],
+		styles[styleIdx],
+		randWord,
+		randColor,
+		randColor,
+		randColor,
+	)
+	
+	encodedPrompt := url.QueryEscape(uniquePrompt)
+	seed := timestamp + int64(i.rand.Intn(1000000))
+	cacheBuster := fmt.Sprintf("%d_%d_%d", timestamp, seed, i.rand.Intn(999999))
+	
+	urlStr := fmt.Sprintf("https://image.pollinations.ai/prompt/%s?width=%d&height=%d&enhance=true&nologo=true&seed=%d&_cb=%s&_t=%d&rnd=%d", 
+		encodedPrompt, width, height, seed, cacheBuster, timestamp, i.rand.Intn(99999))
+	
+	if err := i.sandbox.CheckURL(urlStr); err != nil {
+		return TypedValue{}, err
+	}
+	
+	safeFilename := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(prompt, "_")
+	if len(safeFilename) > 50 {
+		safeFilename = safeFilename[:50]
+	}
+	if safeFilename == "" {
+		safeFilename = "lgbt_image"
+	}
+	
+	filename := fmt.Sprintf("%s_%s_%d.png", safeFilename, dateStr, seed%100000)
+	
+	// ====== ИСПРАВЛЕННЫЙ БЛОК - НЕ ЗАВИСАЕТ ======
+	
+	// 1. Создаем контекст с таймаутом
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	
+	// 2. Создаем клиент с настройками для предотвращения зависаний
+	client := &http.Client{
+		Timeout: 45 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        1,
+			MaxIdleConnsPerHost: 1,
+			DisableKeepAlives:   true, // Закрываем соединения после запроса
+		},
+	}
+	
+	// 3. Создаем запрос с контекстом
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: failed to create request: %v", err)
+	}
+	
+	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Expires", "0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	
+	// 4. Выполняем запрос
+	resp, err := client.Do(req)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	// 5. Читаем весь ответ в память (гарантирует закрытие соединения)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: cannot read response: %v", err)
+	}
+	
+	if resp.StatusCode != http.StatusOK {
+		return TypedValue{}, fmt.Errorf("lgbtImg: HTTP error: %s", resp.Status)
+	}
+	
+	// 6. Проверяем размер
+	if int64(len(body)) > i.sandbox.maxFileSize {
+		return TypedValue{}, fmt.Errorf("lgbtImg: image too large: %d bytes", len(body))
+	}
+	
+	// 7. Сохраняем файл
+	file, err := os.Create(filename)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: cannot create file: %v", err)
+	}
+	defer file.Close()
+	
+	written, err := file.Write(body)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: cannot write file: %v", err)
+	}
+	
+	// Формируем результат
+	result := fmt.Sprintf("🏳️‍🌈 Изображение сохранено: %s\n", filename)
+	result += fmt.Sprintf("📐 Размер: %dx%d\n", width, height)
+	result += fmt.Sprintf("📝 Промпт: %s\n", prompt)
+	result += fmt.Sprintf("🎨 Уникальный промпт: %s\n", uniquePrompt[:min(100, len(uniquePrompt))])
+	result += fmt.Sprintf("🎲 Seed: %d\n", seed)
+	result += fmt.Sprintf("📅 Время: %s\n", dateStr)
+	result += fmt.Sprintf("📦 Размер файла: %d байт\n", written)
+	
+	fmt.Fprintf(output, "✅ Сгенерировано ЛГБТ-изображение: %s\n", filename)
+	fmt.Fprintf(output, "📐 Размер: %dx%d\n", width, height)
+	fmt.Fprintf(output, "📝 Оригинальный промпт: %s\n", prompt)
+	fmt.Fprintf(output, "🎨 Уникальный промпт: %s\n", uniquePrompt[:min(100, len(uniquePrompt))])
+	fmt.Fprintf(output, "🎲 Seed: %d\n", seed)
+	fmt.Fprintf(output, "📅 Время: %s\n", dateStr)
+	fmt.Fprintf(output, "📦 Размер файла: %d байт\n", written)
+	
+	return NewTypedString(result), nil
+}
+
+// Вспомогательная функция min
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ============================================
@@ -4508,6 +4693,7 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 		"getServerStatus":       i.getServerStatus,
 		"listServers":           i.listServers,
 		"antiHomoPhobe":         i.antiHomoPhobe,
+		"lgbtImg":               i.lgbtImg,
 		"getLGBTResources":      i.getLGBTResources,
 		"findSafeSpace":         i.findSafeSpace,
 		"getCrisisSupport":      i.getCrisisSupport,
@@ -6059,7 +6245,9 @@ func infoSize(f *os.File) int64 {
 		return 0
 	}
 	return info.Size()
-}// ---------- runScript выполняет скрипт из строки ----------
+}
+
+// ---------- runScript выполняет скрипт из строки ----------
 func runScript(script string, showTokens, showAST bool) error {
     lexer := NewLexer(script)
     
@@ -6105,6 +6293,7 @@ func runScript(script string, showTokens, showAST bool) error {
     }
     return nil
 }
+
 // ---------- Главная функция ----------
 func main() {
 	setupConsole()
@@ -6210,7 +6399,7 @@ func main() {
 		}
 		return
 	}
-
+ 
 	fmt.Fprintln(output, "🌈 LGBTScript - Язык программирования с поддержкой ЛГБТ+ сообщества")
 	fmt.Fprintln(output, "📖 Используйте --example для демонстрации инкремента и декремента")
 	fmt.Fprintln(output, "📁 Укажите файл .rainbow для выполнения")

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/md5"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -78,7 +79,7 @@ func NewLexer(input string) *Lexer {
 		line:  1,
 		col:   1,
 		keywords: map[string]bool{
-			"lesbian": true, "gay": true, "trans": true, "nonbinary": true, "gender": true,
+			"lesbian": true, "gay": true, "queer": true, "nonbinary": true, "gender": true,
 			"comingout": true, "cis": true, "nocis": true,
 			"true": true, "false": true,
 			"help": true, "orientation": true,
@@ -86,9 +87,6 @@ func NewLexer(input string) *Lexer {
 			"return": true,
 			"try": true, "catch": true,
 			"export": true,
-			"queer": true, "extends": true, "this": true, "super": true, "new": true,
-			"pride": true,
-			"sex": true,
 			"asexual": true,
 		},
 		err: nil,
@@ -351,10 +349,8 @@ func (l *Lexer) tokenizeOperator() error {
 	startCol := l.col
 	var value string
 
-	// Проверяем составные операторы
 	if l.pos+1 < len(l.input) {
 		next := l.input[l.pos+1]
-		// Двухсимвольные операторы
 		if (ch == '=' && next == '=') || (ch == '!' && next == '=') ||
 			(ch == '<' && next == '=') || (ch == '>' && next == '=') ||
 			(ch == '&' && next == '&') || (ch == '|' && next == '|') ||
@@ -367,7 +363,6 @@ func (l *Lexer) tokenizeOperator() error {
 			l.tokens = append(l.tokens, Token{TOKEN_OPERATOR, value, startLine, startCol})
 			return nil
 		}
-		// Постфиксный инкремент/декремент
 		if (ch == '+' && next == '+') || (ch == '-' && next == '-') {
 			value = string(ch) + string(next)
 			l.pos += 2
@@ -377,7 +372,6 @@ func (l *Lexer) tokenizeOperator() error {
 		}
 	}
 
-	// Односимвольные операторы
 	operators := "=+-*/%<>=!(){},;."
 	if strings.ContainsRune(operators, rune(ch)) {
 		value = string(ch)
@@ -473,8 +467,8 @@ type ArrayAssignmentStatement struct {
 type IncrementDecrementStatement struct {
 	BaseNode
 	Name     string
-	Operator string // "++" или "--"
-	Postfix  bool   // true если постфиксный, false если префиксный
+	Operator string
+	Postfix  bool
 }
 
 type PrintStatement struct {
@@ -562,42 +556,6 @@ type ConstantDeclaration struct {
 	BaseNode
 	Name  string
 	Value Node
-}
-
-type QueerClassDeclaration struct {
-	BaseNode
-	Name       string
-	Parent     string
-	Fields     map[string]string
-	Methods    map[string]*FunctionDeclaration
-	Constructor *FunctionDeclaration
-}
-
-type QueerInstanceNode struct {
-	BaseNode
-	ClassName string
-	Args      []Node
-}
-
-type QueerFieldAccessNode struct {
-	BaseNode
-	Object Node
-	Field  string
-}
-
-type QueerMethodCallNode struct {
-	BaseNode
-	Object Node
-	Method string
-	Args   []Node
-}
-
-type ThisNode struct {
-	BaseNode
-}
-
-type SuperNode struct {
-	BaseNode
 }
 
 type Program struct {
@@ -689,7 +647,7 @@ func (p *Parser) parseStatement() (Node, error) {
 	if token.Type == TOKEN_KEYWORD {
 		keyword := token.Value
 		switch keyword {
-		case "lesbian", "gay", "trans", "nonbinary", "gender":
+		case "lesbian", "gay", "queer", "nonbinary", "gender":
 			return p.parseTypedDeclaration()
 		case "comingout":
 			return p.parsePrintStatement()
@@ -711,10 +669,6 @@ func (p *Parser) parseStatement() (Node, error) {
 			return p.parseTryCatchStatement()
 		case "export":
 			return p.parseExportStatement()
-		case "queer":
-			return p.parseQueerClassDeclaration()
-		case "new":
-			return p.parseNewInstance()
 		case "asexual":
 			return p.parseConstantDeclaration()
 		}
@@ -723,7 +677,6 @@ func (p *Parser) parseStatement() (Node, error) {
 	if token.Type == TOKEN_IDENTIFIER {
 		nextToken := p.peekNext()
 		
-		// Проверяем на инкремент/декремент
 		if nextToken.Value == "++" || nextToken.Value == "--" {
 			return p.parseIncrementDecrement(token.Value, false)
 		}
@@ -748,10 +701,6 @@ func (p *Parser) parseStatement() (Node, error) {
 			return p.parseAssignment(token.Value)
 		}
 
-		if nextToken.Value == "." {
-			return p.parseFieldAccess(token.Value)
-		}
-
 		expr, err := p.parseExpression()
 		if err != nil {
 			return nil, err
@@ -763,7 +712,6 @@ func (p *Parser) parseStatement() (Node, error) {
 	}
 
 	if token.Type == TOKEN_OPERATOR {
-		// Префиксный инкремент/декремент
 		if token.Value == "++" || token.Value == "--" {
 			p.next()
 			if p.peek().Type != TOKEN_IDENTIFIER {
@@ -783,64 +731,6 @@ func (p *Parser) parseStatement() (Node, error) {
 		}
 	}
 
-	if token.Type == TOKEN_KEYWORD {
-		if token.Value == "this" {
-			p.next()
-			if p.peek().Value == "." {
-				p.next()
-				field, err := p.expect(TOKEN_IDENTIFIER, "")
-				if err != nil {
-					return nil, err
-				}
-				return &QueerFieldAccessNode{
-					BaseNode: BaseNode{Line: line, Col: col},
-					Object:   &ThisNode{BaseNode: BaseNode{Line: line, Col: col}},
-					Field:    field.Value,
-				}, nil
-			}
-			return &ThisNode{BaseNode: BaseNode{Line: line, Col: col}}, nil
-		}
-		if token.Value == "super" {
-			p.next()
-			if p.peek().Value == "." {
-				p.next()
-				method, err := p.expect(TOKEN_IDENTIFIER, "")
-				if err != nil {
-					return nil, err
-				}
-				_, err = p.expect(TOKEN_OPERATOR, "(")
-				if err != nil {
-					return nil, err
-				}
-				var args []Node
-				if p.peek().Value != ")" {
-					for {
-						arg, err := p.parseExpression()
-						if err != nil {
-							return nil, err
-						}
-						args = append(args, arg)
-						if p.peek().Value == "," {
-							p.next()
-							continue
-						}
-						break
-					}
-				}
-				_, err = p.expect(TOKEN_OPERATOR, ")")
-				if err != nil {
-					return nil, err
-				}
-				return &QueerMethodCallNode{
-					BaseNode: BaseNode{Line: line, Col: col},
-					Object:   &SuperNode{BaseNode: BaseNode{Line: line, Col: col}},
-					Method:   method.Value,
-					Args:     args,
-				}, nil
-			}
-		}
-	}
-
 	expr, err := p.parseExpression()
 	if err != nil {
 		return nil, err
@@ -849,183 +739,6 @@ func (p *Parser) parseStatement() (Node, error) {
 		p.next()
 	}
 	return &ExpressionStatement{BaseNode: BaseNode{Line: line, Col: col}, Expr: expr}, nil
-}
-
-func (p *Parser) parseQueerClassDeclaration() (Node, error) {
-	token := p.peek()
-	p.next()
-	
-	name, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-	
-	var parent string
-	if p.peek().Value == "extends" {
-		p.next()
-		parentToken, err := p.expect(TOKEN_IDENTIFIER, "")
-		if err != nil {
-			return nil, err
-		}
-		parent = parentToken.Value
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, "{")
-	if err != nil {
-		return nil, err
-	}
-	
-	class := &QueerClassDeclaration{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Name:     name.Value,
-		Parent:   parent,
-		Fields:   make(map[string]string),
-		Methods:  make(map[string]*FunctionDeclaration),
-	}
-	
-	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
-		tok := p.peek()
-		if tok.Type == TOKEN_KEYWORD {
-			keyword := tok.Value
-			switch keyword {
-			case "lesbian", "gay", "trans", "nonbinary", "gender":
-				p.next()
-				fieldName, err := p.expect(TOKEN_IDENTIFIER, "")
-				if err != nil {
-					return nil, err
-				}
-				class.Fields[fieldName.Value] = keyword
-				if p.peek().Value == ";" {
-					p.next()
-				}
-			case "rainbow":
-				method, err := p.parseFunctionDeclaration()
-				if err != nil {
-					return nil, err
-				}
-				if fn, ok := method.(*FunctionDeclaration); ok {
-					if fn.Name == "init" {
-						class.Constructor = fn
-					} else {
-						class.Methods[fn.Name] = fn
-					}
-				}
-			default:
-				return nil, fmt.Errorf("unexpected keyword in class: %s", keyword)
-			}
-		} else {
-			return nil, fmt.Errorf("expected field or method in class, got %s", tok.Value)
-		}
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, "}")
-	if err != nil {
-		return nil, err
-	}
-	
-	return class, nil
-}
-
-func (p *Parser) parseNewInstance() (Node, error) {
-	token := p.peek()
-	p.next()
-	
-	className, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, "(")
-	if err != nil {
-		return nil, err
-	}
-	
-	var args []Node
-	if p.peek().Value != ")" {
-		for {
-			arg, err := p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			args = append(args, arg)
-			
-			if p.peek().Value == "," {
-				p.next()
-				continue
-			}
-			break
-		}
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, ")")
-	if err != nil {
-		return nil, err
-	}
-	
-	return &QueerInstanceNode{
-		BaseNode:  BaseNode{Line: token.Line, Col: token.Col},
-		ClassName: className.Value,
-		Args:      args,
-	}, nil
-}
-
-func (p *Parser) parseFieldAccess(objName string) (Node, error) {
-	token := p.peek()
-	p.next()
-	
-	_, err := p.expect(TOKEN_OPERATOR, ".")
-	if err != nil {
-		return nil, err
-	}
-	
-	field, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-	
-	if p.peek().Value == "(" {
-		p.pos--
-		methodName := field.Value
-		_, err := p.expect(TOKEN_OPERATOR, "(")
-		if err != nil {
-			return nil, err
-		}
-		
-		var args []Node
-		if p.peek().Value != ")" {
-			for {
-				arg, err := p.parseExpression()
-				if err != nil {
-					return nil, err
-				}
-				args = append(args, arg)
-				
-				if p.peek().Value == "," {
-					p.next()
-					continue
-				}
-				break
-			}
-		}
-		
-		_, err = p.expect(TOKEN_OPERATOR, ")")
-		if err != nil {
-			return nil, err
-		}
-		
-		return &QueerMethodCallNode{
-			BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-			Object:   &VariableNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Name: objName},
-			Method:   methodName,
-			Args:     args,
-		}, nil
-	}
-	
-	return &QueerFieldAccessNode{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Object:   &VariableNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Name: objName},
-		Field:    field.Value,
-	}, nil
 }
 
 func (p *Parser) parseExportStatement() (Node, error) {
@@ -1264,7 +977,7 @@ func (p *Parser) parseTypedDeclaration() (Node, error) {
 		defaultValue = &StringNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: ""}
 	case "gay":
 		defaultValue = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
-	case "trans":
+	case "queer":
 		defaultValue = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
 	case "nonbinary":
 		defaultValue = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
@@ -1282,18 +995,15 @@ func (p *Parser) parseTypedDeclaration() (Node, error) {
 	}, nil
 }
 
-// parseSexStatement — парсер цикла sex (for)
 func (p *Parser) parseSexStatement() (Node, error) {
 	token := p.peek()
-	p.next() // пропускаем SEX
+	p.next()
 
-	// Ожидаем (
 	if p.peek().Value != "(" {
 		return nil, fmt.Errorf("expected '(' after SEX, got '%s' at line %d", p.peek().Value, p.peek().Line)
 	}
-	p.next() // пропускаем (
+	p.next()
 
-	// --- Инициализация ---
 	init, err := p.parseSexPart()
 	if err != nil {
 		return nil, err
@@ -1302,9 +1012,8 @@ func (p *Parser) parseSexStatement() (Node, error) {
 		return nil, fmt.Errorf("expected ';' after initialization in SEX loop at line %d, got '%s'",
 			p.peek().Line, p.peek().Value)
 	}
-	p.next() // пропускаем ;
+	p.next()
 
-	// --- Условие ---
 	condition, err := p.parseSexPart()
 	if err != nil {
 		return nil, err
@@ -1316,9 +1025,8 @@ func (p *Parser) parseSexStatement() (Node, error) {
 		return nil, fmt.Errorf("expected ';' after condition in SEX loop at line %d, got '%s'",
 			p.peek().Line, p.peek().Value)
 	}
-	p.next() // пропускаем ;
+	p.next()
 
-	// --- Обновление ---
 	update, err := p.parseSexPart()
 	if err != nil {
 		return nil, err
@@ -1327,14 +1035,13 @@ func (p *Parser) parseSexStatement() (Node, error) {
 		return nil, fmt.Errorf("expected ')' after update in SEX loop at line %d, got '%s'",
 			p.peek().Line, p.peek().Value)
 	}
-	p.next() // пропускаем )
+	p.next()
 
-	// --- Тело ---
 	if p.peek().Value != "{" {
 		return nil, fmt.Errorf("expected '{' after SEX loop header at line %d, got '%s'",
 			p.peek().Line, p.peek().Value)
 	}
-	p.next() // пропускаем {
+	p.next()
 
 	body, err := p.parseBlock()
 	if err != nil {
@@ -1345,7 +1052,7 @@ func (p *Parser) parseSexStatement() (Node, error) {
 		return nil, fmt.Errorf("expected '}' after SEX loop body at line %d, got '%s'",
 			p.peek().Line, p.peek().Value)
 	}
-	p.next() // пропускаем }
+	p.next()
 
 	return &SexStatement{
 		BaseNode:  BaseNode{Line: token.Line, Col: token.Col},
@@ -1356,18 +1063,16 @@ func (p *Parser) parseSexStatement() (Node, error) {
 	}, nil
 }
 
-// parseSexPart парсит одну часть цикла SEX (инициализация, условие или обновление)
 func (p *Parser) parseSexPart() (Node, error) {
 	tok := p.peek()
 	if tok.Type == TOKEN_EOF || tok.Value == ";" || tok.Value == ")" {
 		return nil, nil
 	}
 
-	// Проверяем на объявление переменной
 	if tok.Type == TOKEN_KEYWORD {
 		keyword := tok.Value
 		switch keyword {
-		case "gay", "lesbian", "trans", "nonbinary", "gender":
+		case "gay", "lesbian", "queer", "nonbinary", "gender":
 			decl, err := p.parseTypedDeclarationNoSemicolon()
 			if err != nil {
 				return nil, err
@@ -1376,23 +1081,21 @@ func (p *Parser) parseSexPart() (Node, error) {
 		}
 	}
 
-	// Иначе это выражение
 	return p.parseExpression()
 }
 
-// parseTypedDeclarationNoSemicolon парсит объявление переменной без потребления ;
 func (p *Parser) parseTypedDeclarationNoSemicolon() (Node, error) {
 	token := p.peek()
 	if token.Type != TOKEN_KEYWORD {
 		return nil, fmt.Errorf("expected type keyword, got '%s' at line %d", token.Value, token.Line)
 	}
 	keyword := token.Value
-	if keyword != "gay" && keyword != "lesbian" && keyword != "trans" &&
+	if keyword != "gay" && keyword != "lesbian" && keyword != "queer" &&
 		keyword != "nonbinary" && keyword != "gender" {
-		return nil, fmt.Errorf("expected type keyword (gay, lesbian, trans, nonbinary, gender), got '%s' at line %d",
+		return nil, fmt.Errorf("expected type keyword (gay, lesbian, queer, nonbinary, gender), got '%s' at line %d",
 			keyword, token.Line)
 	}
-	p.next() // пропускаем ключевое слово
+	p.next()
 
 	nameToken := p.peek()
 	if nameToken.Type != TOKEN_IDENTIFIER {
@@ -1400,24 +1103,23 @@ func (p *Parser) parseTypedDeclarationNoSemicolon() (Node, error) {
 			nameToken.Value, nameToken.Line)
 	}
 	name := nameToken.Value
-	p.next() // пропускаем имя
+	p.next()
 
 	var value Node
 	var err error
 	if p.peek().Value == "=" {
-		p.next() // пропускаем =
+		p.next()
 		value, err = p.parseExpression()
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		// значение по умолчанию
 		switch keyword {
 		case "gay":
 			value = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
 		case "lesbian":
 			value = &StringNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: ""}
-		case "trans":
+		case "queer":
 			value = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
 		case "nonbinary":
 			value = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
@@ -1436,12 +1138,11 @@ func (p *Parser) parseTypedDeclarationNoSemicolon() (Node, error) {
 	}, nil
 }
 
-// parseIncrementDecrement парсит инкремент/декремент
 func (p *Parser) parseIncrementDecrement(name string, postfix bool) (Node, error) {
 	token := p.peek()
 	op := p.peekNext().Value
-	p.next() // пропускаем имя
-	p.next() // пропускаем оператор
+	p.next()
+	p.next()
 	if p.peek().Value == ";" {
 		p.next()
 	}
@@ -1453,12 +1154,11 @@ func (p *Parser) parseIncrementDecrement(name string, postfix bool) (Node, error
 	}, nil
 }
 
-// parseAssignment парсит присваивание (простое или составное)
 func (p *Parser) parseAssignment(name string) (Node, error) {
 	token := p.peek()
 	op := p.peekNext().Value
-	p.next() // пропускаем имя
-	p.next() // пропускаем оператор
+	p.next()
+	p.next()
 	
 	value, err := p.parseExpression()
 	if err != nil {
@@ -1476,14 +1176,13 @@ func (p *Parser) parseAssignment(name string) (Node, error) {
 		}, nil
 	}
 	
-	// Составное присваивание
 	if p.peek().Value == ";" {
 		p.next()
 	}
 	return &AugmentedAssignmentStatement{
 		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
 		Name:     name,
-		Op:       op[:len(op)-1], // убираем '='
+		Op:       op[:len(op)-1],
 		Value:    value,
 	}, nil
 }
@@ -1795,7 +1494,6 @@ func (p *Parser) parseUnary() (Node, error) {
 		return &UnaryNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Op: op, Expr: expr}, nil
 	}
 	
-	// Префиксный инкремент/декремент
 	if p.peek().Value == "++" || p.peek().Value == "--" {
 		op := p.next().Value
 		if p.peek().Type != TOKEN_IDENTIFIER {
@@ -1850,12 +1548,11 @@ func (p *Parser) parsePrimary() (Node, error) {
 		}
 		return &ArrayNode{BaseNode: BaseNode{Line: line, Col: col}, Elements: elements}, nil
 	case TOKEN_IDENTIFIER:
-		// Проверяем на постфиксный инкремент/декремент
 		if p.peekNext().Value == "++" || p.peekNext().Value == "--" {
 			name := token.Value
 			op := p.peekNext().Value
-			p.next() // пропускаем имя
-			p.next() // пропускаем оператор
+			p.next()
+			p.next()
 			return &IncrementDecrementStatement{
 				BaseNode: BaseNode{Line: line, Col: col},
 				Name:     name,
@@ -1884,9 +1581,6 @@ func (p *Parser) parsePrimary() (Node, error) {
 		if p.peekNext().Value == "(" {
 			return p.parseFunctionCall(token.Value)
 		}
-		if p.peekNext().Value == "." {
-			return p.parseFieldAccess(token.Value)
-		}
 		p.next()
 		return &VariableNode{BaseNode: BaseNode{Line: line, Col: col}, Name: token.Value}, nil
 	case TOKEN_KEYWORD:
@@ -1897,9 +1591,6 @@ func (p *Parser) parsePrimary() (Node, error) {
 		} else if keyword == "false" {
 			p.next()
 			return &BooleanNode{BaseNode: BaseNode{Line: line, Col: col}, Value: false}, nil
-		} else if keyword == "this" {
-			p.next()
-			return &ThisNode{BaseNode: BaseNode{Line: line, Col: col}}, nil
 		}
 		return nil, fmt.Errorf("unexpected keyword: %s", token.Value)
 	case TOKEN_OPERATOR:
@@ -1928,7 +1619,6 @@ const (
 	TypeFloat
 	TypeBool
 	TypeArray
-	TypeObject
 	TypeNull
 )
 
@@ -1954,11 +1644,6 @@ func (tv TypedValue) String() string {
 			parts[i] = v.String()
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
-	case TypeObject:
-		if obj, ok := tv.Value.(*QueerInstance); ok {
-			return obj.String()
-		}
-		return "{object}"
 	default:
 		return "null"
 	}
@@ -1988,26 +1673,6 @@ func NewTypedArray(arr []TypedValue) TypedValue {
 	return TypedValue{Type: TypeArray, Value: arr}
 }
 
-func NewTypedObject(obj *QueerInstance) TypedValue {
-	return TypedValue{Type: TypeObject, Value: obj}
-}
-
-// ---------- QUEER классы во время выполнения ----------
-type QueerInstance struct {
-	ClassName string
-	Fields    map[string]TypedValue
-	Methods   map[string]*FunctionDeclaration
-	Parent    *QueerInstance
-}
-
-func (qi *QueerInstance) String() string {
-	fields := make([]string, 0, len(qi.Fields))
-	for name, value := range qi.Fields {
-		fields = append(fields, fmt.Sprintf("%s: %s", name, value.String()))
-	}
-	return fmt.Sprintf("%s{%s}", qi.ClassName, strings.Join(fields, ", "))
-}
-
 // ---------- Структуры для серверов ----------
 type ServerInstance struct {
 	mu       sync.RWMutex
@@ -2022,22 +1687,38 @@ type ServerInstance struct {
 // Глобальное хранилище серверов
 var servers = make(map[string]*ServerInstance)
 var serversMu sync.RWMutex
-// ---------- Интерпретатор ----------
 
-// callFrame - структура для хранения переменных в стеке вызовов
+// ============================================
+// STABLE DIFFUSION КОНФИГУРАЦИЯ
+// ============================================
+
+type SDConfig struct {
+	APIURL      string
+	APIKey      string
+	Model       string
+	Timeout     time.Duration
+	MaxAttempts int
+}
+
+var sdConfig = SDConfig{
+	APIURL:      "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
+	APIKey:      "",
+	Model:       "stable-diffusion-xl-1024-v1-0",
+	Timeout:     60 * time.Second,
+	MaxAttempts: 3,
+}
+
+// ---------- Интерпретатор ----------
 type callFrame struct {
     vars      map[string]TypedValue
     types     map[string]string
     constants map[string]bool
 }
 
-// Interpreter - основной интерпретатор
 type Interpreter struct {
     variables      map[string]TypedValue
     variableTypes  map[string]string
     functions      map[string]*FunctionDeclaration
-    queerClasses   map[string]*QueerClassDeclaration
-    instances      map[string]*QueerInstance
     exportedFuncs  map[string]*FunctionDeclaration
     callStack      []callFrame
     returnValue    TypedValue
@@ -2048,12 +1729,10 @@ type Interpreter struct {
     errorHandler   func(error, int, int)
     sandbox        *Sandbox
     rand           *rand.Rand
-    this           *QueerInstance
 }
 
-// checkForOffensiveTerms проверяет код на наличие оскорбительных терминов
 func (i *Interpreter) checkForOffensiveTerms(code string) (bool, []string) {
-    offensiveTerms := []string{"пидор", "педик", "faggot", "Pouf", "лесбуха", "транс", "Bender", "гомосексуалист"}
+    offensiveTerms := []string{"пидор", "педик", "faggot", "Pouf", "лесбуха", "Bender", "гомосексуалист"}
     foundTerms := []string{}
     
     for _, term := range offensiveTerms {
@@ -2070,7 +1749,6 @@ func (i *Interpreter) checkForOffensiveTerms(code string) (bool, []string) {
     return false, foundTerms
 }
 
-// showSupportMessage показывает сообщение поддержки ЛГБТ+ сообщества
 func (i *Interpreter) showSupportMessage() {
     fmt.Println("🏳️‍🌈 Поддержка ЛГБТ+ сообщества:")
     fmt.Println("📞 Горячая линия поддержки: 8-800-XXX-XX-XX")
@@ -2078,14 +1756,11 @@ func (i *Interpreter) showSupportMessage() {
     fmt.Println("💙 Вы не одиноки!")
 }
 
-// NewInterpreter создает новый интерпретатор
 func NewInterpreter() *Interpreter {
     return &Interpreter{
         variables:      make(map[string]TypedValue),
         variableTypes:  make(map[string]string),
         functions:      make(map[string]*FunctionDeclaration),
-        queerClasses:   make(map[string]*QueerClassDeclaration),
-        instances:      make(map[string]*QueerInstance),
         exportedFuncs:  make(map[string]*FunctionDeclaration),
         callStack:      []callFrame{{vars: make(map[string]TypedValue), types: make(map[string]string), constants: make(map[string]bool)}},
         returnValue:    TypedValue{Type: TypeNull, Value: nil},
@@ -2094,15 +1769,8 @@ func NewInterpreter() *Interpreter {
         recursionDepth: 0,
         sandbox:        NewSandbox(),
         rand:           rand.New(rand.NewSource(time.Now().UnixNano())),
-        this:           nil,
     }
 }
-
-
-
-
-
-
 
 func (i *Interpreter) handleError(err error, line, col int) {
 	if i.errorHandler != nil {
@@ -2193,7 +1861,7 @@ func (i *Interpreter) getTypeFromKeyword(keyword string) ValueType {
 		return TypeString
 	case "gay":
 		return TypeInt
-	case "trans":
+	case "queer":
 		return TypeFloat
 	case "nonbinary":
 		return TypeBool
@@ -2447,9 +2115,6 @@ func (i *Interpreter) addRoute(args []TypedValue) (TypedValue, error) {
 	}
 	
 	handlerValue := args[3]
-	if handlerValue.Type != TypeObject {
-		return TypedValue{}, fmt.Errorf("addRoute: fourth argument must be a function")
-	}
 	
 	var handlerFunc func([]TypedValue) (TypedValue, error)
 	
@@ -2567,11 +2232,10 @@ func (i *Interpreter) listServers(args []TypedValue) (TypedValue, error) {
 }
 
 // ============================================
-// ФУНКЦИЯ antiHomoPhobe (РАБОТАЕТ НА WINDOWS 10)
+// ФУНКЦИЯ antiHomoPhobe
 // ============================================
 
 func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
-	// Длительность (по умолчанию 7 сек)
 	duration := 7
 	if len(args) > 0 {
 		if d, ok := args[0].Value.(int); ok {
@@ -2585,9 +2249,7 @@ func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
 	fmt.Fprintf(output, "🔄 Выдвигаю дисковод и мигаю лампочками клавиатуры...\n")
 	fmt.Fprintf(output, "⏱️  Длительность: %d секунд\n\n", duration)
 
-	// ----- Выдвижение дисковода -----
 	if runtime.GOOS == "windows" {
-		// PowerShell: EjectCD()
 		cmd := exec.Command("powershell", "-Command", "(New-Object -ComObject Shell.Application).EjectCD()")
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
@@ -2595,7 +2257,6 @@ func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
 			fmt.Fprintf(output, "💿 Дисковод выдвинут\n")
 		}
 	} else {
-		// Linux / macOS
 		cmd := exec.Command("eject")
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
@@ -2607,7 +2268,6 @@ func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
 	startTime := time.Now()
 	done := make(chan bool)
 
-	// ----- Горутина: мигание лампочек и обратный отсчёт -----
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
@@ -2622,22 +2282,17 @@ func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
 					remaining = 0
 				}
 
-				// Визуализация в консоли
 				if state {
 					fmt.Fprintf(output, "\r💡💡💡 [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
 				} else {
 					fmt.Fprintf(output, "\r⬜⬜⬜ [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
 				}
 
-				// Реальное переключение лампочек (только Windows)
 				if runtime.GOOS == "windows" {
-					// CapsLock (VK_CAPITAL = 0x14)
-					keybdEvent(0x14, 0, 0, 0)          // KEYEVENTF_KEYDOWN
-					keybdEvent(0x14, 0, 0x0002, 0)    // KEYEVENTF_KEYUP
-					// NumLock (VK_NUMLOCK = 0x90)
+					keybdEvent(0x14, 0, 0, 0)
+					keybdEvent(0x14, 0, 0x0002, 0)
 					keybdEvent(0x90, 0, 0, 0)
 					keybdEvent(0x90, 0, 0x0002, 0)
-					// ScrollLock (VK_SCROLL = 0x91)
 					keybdEvent(0x91, 0, 0, 0)
 					keybdEvent(0x91, 0, 0x0002, 0)
 				}
@@ -2655,7 +2310,6 @@ func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
 	<-done
 	fmt.Fprintln(output)
 
-	// ----- Закрытие дисковода -----
 	if runtime.GOOS == "windows" {
 		fmt.Fprintf(output, "📀 Для закрытия дисковода нажмите кнопку на приводе или используйте 'Извлечь' в проводнике.\n")
 	} else {
@@ -2674,7 +2328,6 @@ func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
 	return NewTypedString(result), nil
 }
 
-// keybd_event обёртка для Windows
 var (
 	user32DLL = syscall.NewLazyDLL("user32.dll")
 	procKeybdEvent = user32DLL.NewProc("keybd_event")
@@ -2685,1292 +2338,584 @@ func keybdEvent(bVk byte, bScan byte, dwFlags uintptr, dwExtraInfo uintptr) {
 }
 
 // ============================================
-// ФУНКЦИЯ getLGBTResources - возвращает JSON с данными от проверенных НКО
+// ФУНКЦИИ ДЛЯ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ (STABLE DIFFUSION)
 // ============================================
 
-func (i *Interpreter) getLGBTResources(args []TypedValue) (TypedValue, error) {
-	// Определяем структуру ресурса
-	type Resource struct {
-		ID          string   `json:"id"`
-		Name        string   `json:"name"`
-		Type        string   `json:"type"`
-		Description string   `json:"description"`
-		Country     string   `json:"country"`
-		City        string   `json:"city"`
-		Address     string   `json:"address,omitempty"`
-		Phone       string   `json:"phone,omitempty"`
-		Email       string   `json:"email,omitempty"`
-		Website     string   `json:"website,omitempty"`
-		Services    []string `json:"services"`
-		WorkingHours string  `json:"working_hours,omitempty"`
-		Verified    bool     `json:"verified"`
-		Rating      float64  `json:"rating,omitempty"`
-		Reviews     int      `json:"reviews,omitempty"`
-		Languages   []string `json:"languages,omitempty"`
+func (i *Interpreter) setSDKey(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("setSDKey: expected API key")
 	}
-
-	// Проверенные НКО (база данных)
-	resources := []Resource{
-		{
-			ID:          "r1",
-			Name:        "Российская ЛГБТ-сеть",
-			Type:        "network",
-			Description: "Крупнейшая российская ЛГБТ-организация, предоставляющая юридическую, психологическую и социальную поддержку",
-			Country:     "Россия",
-			City:        "Москва",
-			Address:     "ул. Тверская, д. 15, оф. 302",
-			Phone:       "+7 (495) 123-45-67",
-			Email:       "info@lgbtnet.ru",
-			Website:     "https://lgbtnet.ru",
-			Services:    []string{"юридическая_помощь", "психологическая_поддержка", "горячая_линия", "социальная_адаптация", "образовательные_программы"},
-			WorkingHours: "Пн-Пт: 10:00-20:00, Сб: 12:00-18:00",
-			Verified:    true,
-			Rating:      4.8,
-			Reviews:     124,
-			Languages:   []string{"ru", "en"},
-		},
-		{
-			ID:          "r2",
-			Name:        "Центр 'Сфера'",
-			Type:        "psychological",
-			Description: "Центр психологической и социальной поддержки ЛГБТ+ людей",
-			Country:     "Россия",
-			City:        "Санкт-Петербург",
-			Address:     "Невский проспект, д. 25",
-			Phone:       "+7 (812) 987-65-43",
-			Email:       "sphere@lgbt.support",
-			Website:     "https://sfera-spb.ru",
-			Services:    []string{"психологическая_поддержка", "группы_поддержки", "консультации", "горячая_линия"},
-			WorkingHours: "Пн-Вс: 09:00-21:00",
-			Verified:    true,
-			Rating:      4.6,
-			Reviews:     89,
-			Languages:   []string{"ru"},
-		},
-		{
-			ID:          "r3",
-			Name:        "Human Rights Campaign",
-			Type:        "advocacy",
-			Description: "Крупнейшая американская организация по защите прав ЛГБТ+",
-			Country:     "США",
-			City:        "Вашингтон",
-			Address:     "1640 Rhode Island Ave NW",
-			Phone:       "+1 (202) 628-4160",
-			Email:       "info@hrc.org",
-			Website:     "https://hrc.org",
-			Services:    []string{"адвокация", "юридическая_помощь", "образовательные_программы", "исследования"},
-			WorkingHours: "Пн-Пт: 09:00-18:00 EST",
-			Verified:    true,
-			Rating:      4.9,
-			Reviews:     312,
-			Languages:   []string{"en", "es"},
-		},
-		{
-			ID:          "r4",
-			Name:        "ILGA (International Lesbian, Gay, Bisexual, Trans and Intersex Association)",
-			Type:        "international",
-			Description: "Международная ассоциация, объединяющая ЛГБТ-организации по всему миру",
-			Country:     "Швейцария",
-			City:        "Женева",
-			Address:     "Rue des Deux Tours, 1",
-			Phone:       "+41 (22) 734-32-54",
-			Email:       "info@ilga.org",
-			Website:     "https://ilga.org",
-			Services:    []string{"адвокация", "поддержка_организаций", "исследования", "образование"},
-			WorkingHours: "Пн-Пт: 09:00-17:00 CET",
-			Verified:    true,
-			Rating:      4.7,
-			Reviews:     205,
-			Languages:   []string{"en", "fr", "es", "ru"},
-		},
-		{
-			ID:          "r5",
-			Name:        "The Trevor Project",
-			Type:        "crisis",
-			Description: "Круглосуточная кризисная поддержка ЛГБТ+ молодежи",
-			Country:     "США",
-			City:        "Нью-Йорк",
-			Phone:       "+1 (866) 488-7386",
-			Email:       "help@trevorproject.org",
-			Website:     "https://thetrevorproject.org",
-			Services:    []string{"кризисная_поддержка", "горячая_линия", "чат_поддержки", "психологическая_помощь"},
-			WorkingHours: "Круглосуточно",
-			Verified:    true,
-			Rating:      4.9,
-			Reviews:     456,
-			Languages:   []string{"en", "es"},
-		},
-		{
-			ID:          "r6",
-			Name:        "GLAAD",
-			Type:        "media",
-			Description: "Организация по мониторингу СМИ и защите прав ЛГБТ+ в медиа",
-			Country:     "США",
-			City:        "Нью-Йорк",
-			Address:     "160 Varick St, 6th Floor",
-			Phone:       "+1 (212) 807-1700",
-			Email:       "info@glaad.org",
-			Website:     "https://glaad.org",
-			Services:    []string{"медиа_мониторинг", "образование", "адвокация", "исследования"},
-			WorkingHours: "Пн-Пт: 09:00-18:00 EST",
-			Verified:    true,
-			Rating:      4.5,
-			Reviews:     178,
-			Languages:   []string{"en"},
-		},
+	key, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("setSDKey: first argument must be string")
 	}
+	sdConfig.APIKey = key
+	return NewTypedString("✅ API ключ Stable Diffusion установлен"), nil
+}
 
-	// Фильтрация по параметрам
-	filterCountry := ""
-	filterType := ""
-	filterCity := ""
-	filterService := ""
+func (i *Interpreter) setSDModel(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("setSDModel: expected model name")
+	}
+	model, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("setSDModel: first argument must be string")
+	}
+	sdConfig.Model = model
+	return NewTypedString(fmt.Sprintf("✅ Модель изменена на: %s", model)), nil
+}
 
+func (i *Interpreter) generateLGBTImage(args []TypedValue) (TypedValue, error) {
+	filename := "lgbt.png"
 	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			filterCountry = c
-		}
-	}
-
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			filterType = t
-		}
-	}
-
-	if len(args) > 2 {
-		if c, ok := args[2].Value.(string); ok {
-			filterCity = c
-		}
-	}
-
-	if len(args) > 3 {
-		if s, ok := args[3].Value.(string); ok {
-			filterService = s
-		}
-	}
-
-	// Применяем фильтры
-	filtered := []Resource{}
-	for _, r := range resources {
-		if filterCountry != "" && !strings.Contains(strings.ToLower(r.Country), strings.ToLower(filterCountry)) {
-			continue
-		}
-		if filterType != "" && !strings.Contains(strings.ToLower(r.Type), strings.ToLower(filterType)) {
-			continue
-		}
-		if filterCity != "" && !strings.Contains(strings.ToLower(r.City), strings.ToLower(filterCity)) {
-			continue
-		}
-		if filterService != "" {
-			found := false
-			for _, s := range r.Services {
-				if strings.Contains(strings.ToLower(s), strings.ToLower(filterService)) {
-					found = true
-					break
-				}
+		if name, ok := args[0].Value.(string); ok && name != "" {
+			if !strings.HasSuffix(name, ".png") && !strings.HasSuffix(name, ".jpg") && !strings.HasSuffix(name, ".jpeg") {
+				name = name + ".png"
 			}
-			if !found {
-				continue
+			filename = name
+		}
+	}
+	
+	lgbtPrompts := []string{
+		"beautiful rainbow flag with red orange yellow green blue purple stripes waving in wind, vibrant colors, realistic, high quality photography, 8k, detailed",
+		"colorful rainbow flag flying in blue sky, bright colors, realistic photography, high quality, peaceful, beautiful",
+		"rainbow flag with six horizontal stripes, waving gently, vibrant colors, realistic, high quality, professional photography",
+		"rainbow pride flag flowing in wind, bright vivid colors, realistic, high quality, 4k, detailed",
+		"flag with light blue pink and white horizontal stripes waving in wind, pastel colors, realistic, high quality photography, soft, peaceful",
+		"transgender flag with blue pink and white stripes, waving gracefully, pastel colors, realistic, high quality, beautiful",
+		"light blue pink white flag waving, soft pastel colors, realistic photography, high quality, serene",
+		"flag with pink purple blue horizontal stripes waving in wind, bright colors, realistic, high quality photography, vibrant",
+		"bisexual flag with pink purple and blue stripes, waving, bright colors, realistic, high quality, beautiful",
+		"pink purple blue flag waving in wind, vibrant colors, realistic photography, high quality",
+		"flag with pink yellow blue horizontal stripes waving in wind, bright colors, realistic, high quality photography, colorful",
+		"flag with yellow white purple black horizontal stripes waving in wind, modern design, realistic, high quality photography",
+		"flag with black grey white purple horizontal stripes waving in wind, minimalist design, realistic, high quality photography",
+		"flag with orange white pink horizontal stripes waving in wind, bright colors, realistic, high quality photography",
+		"colorful flag with rainbow stripes and triangle, waving, bright colors, realistic, high quality photography, modern",
+		"abstract art with rainbow colors, flowing, beautiful, high quality, artistic, colorful, 8k",
+		"heart made of rainbow colors, vibrant, beautiful, realistic, high quality, 4k",
+		"rainbow colored waves, flowing together, harmonious, beautiful, artistic, high quality",
+		"colorful celebration, confetti, rainbow colors, joyful, vibrant, realistic, high quality",
+		"rainbow path through a field, colorful, beautiful, realistic, high quality photography",
+		"cityscape with rainbow lights, colorful, modern, realistic, high quality, 8k",
+		"rainbow colors merging together, beautiful, artistic, high quality, detailed",
+	}
+	
+	promptIndex := i.rand.Intn(len(lgbtPrompts))
+	prompt := lgbtPrompts[promptIndex]
+	
+	validSizes := [][2]int{
+		{1024, 1024}, {1152, 896}, {1216, 832}, {1344, 768},
+		{1536, 640}, {640, 1536}, {768, 1344}, {832, 1216}, {896, 1152},
+	}
+	
+	sizeIndex := i.rand.Intn(len(validSizes))
+	width, height := validSizes[sizeIndex][0], validSizes[sizeIndex][1]
+	
+	steps := 25 + i.rand.Intn(16)
+	cfgScale := 6.0 + float64(i.rand.Intn(31))/10.0
+	
+	qualityBoost := []string{"", "masterpiece", "best quality", "ultra detailed", "photorealistic"}
+	quality := qualityBoost[i.rand.Intn(len(qualityBoost))]
+	if quality != "" {
+		prompt = prompt + ", " + quality
+	}
+	
+	if sdConfig.APIKey == "" {
+		return i.generateLocalLGBTImageWithName(prompt, width, height, filename)
+	}
+	
+	return i.generateWithStabilityAIWithName(prompt, width, height, steps, cfgScale, filename)
+}
+
+func (i *Interpreter) generateWithStabilityAIWithName(prompt string, width, height, steps int, cfgScale float64, filename string) (TypedValue, error) {
+	if sdConfig.APIKey == "" {
+		return TypedValue{}, fmt.Errorf("Stability AI API key not set. Use setSDKey() first")
+	}
+	
+	validSizes := [][2]int{
+		{1024, 1024}, {1152, 896}, {1216, 832}, {1344, 768}, 
+		{1536, 640}, {640, 1536}, {768, 1344}, {832, 1216}, {896, 1152},
+	}
+	
+	isValid := false
+	for _, size := range validSizes {
+		if width == size[0] && height == size[1] {
+			isValid = true
+			break
+		}
+	}
+	
+	if !isValid {
+		bestSize := validSizes[0]
+		bestDiff := 999999999
+		
+		for _, size := range validSizes {
+			diff := (width-size[0])*(width-size[0]) + (height-size[1])*(height-size[1])
+			if diff < bestDiff {
+				bestDiff = diff
+				bestSize = size
 			}
 		}
-		filtered = append(filtered, r)
+		
+		width, height = bestSize[0], bestSize[1]
+		fmt.Fprintf(output, "⚠️ Размеры скорректированы до %dx%d (допустимые для SDXL)\n", width, height)
 	}
-
-	response := map[string]interface{}{
-		"total":        len(filtered),
-		"resources":    filtered,
-		"filters": map[string]string{
-			"country": filterCountry,
-			"type":    filterType,
-			"city":    filterCity,
-			"service": filterService,
+	
+	requestBody := map[string]interface{}{
+		"text_prompts": []map[string]interface{}{
+			{
+				"text":   prompt,
+				"weight": 1.0,
+			},
 		},
-		"meta": map[string]interface{}{
-			"timestamp":    time.Now().Format(time.RFC3339),
-			"version":      "1.0",
-			"source":       "LGBTScript Resource Database",
-			"total_orgs":   len(resources),
-			"verified_only": true,
-		},
+		"cfg_scale":    cfgScale,
+		"height":       height,
+		"width":        width,
+		"samples":      1,
+		"steps":        steps,
+		"style_preset": "photographic",
 	}
-
-	jsonData, err := json.MarshalIndent(response, "", "  ")
+	
+	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
-		return TypedValue{}, fmt.Errorf("ошибка сериализации JSON: %v", err)
+		return TypedValue{}, fmt.Errorf("error marshaling request: %v", err)
 	}
-
-	return NewTypedString(string(jsonData)), nil
+	
+	req, err := http.NewRequest("POST", sdConfig.APIURL, strings.NewReader(string(jsonData)))
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("error creating request: %v", err)
+	}
+	
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", sdConfig.APIKey))
+	req.Header.Set("Accept", "application/json")
+	
+	client := &http.Client{Timeout: sdConfig.Timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("API request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return TypedValue{}, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+	
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return TypedValue{}, fmt.Errorf("error decoding response: %v", err)
+	}
+	
+	artifacts, ok := result["artifacts"].([]interface{})
+	if !ok || len(artifacts) == 0 {
+		return TypedValue{}, fmt.Errorf("no image generated")
+	}
+	
+	artifact := artifacts[0].(map[string]interface{})
+	base64Image, ok := artifact["base64"].(string)
+	if !ok || base64Image == "" {
+		return TypedValue{}, fmt.Errorf("no base64 image in response")
+	}
+	
+	imageData, err := base64.StdEncoding.DecodeString(base64Image)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("error decoding image: %v", err)
+	}
+	
+	if err := os.WriteFile(filename, imageData, 0644); err != nil {
+		return TypedValue{}, fmt.Errorf("error saving image: %v", err)
+	}
+	
+	resultMsg := fmt.Sprintf("✅ Изображение сгенерировано и сохранено как '%s'\n", filename)
+	resultMsg += fmt.Sprintf("📝 Промпт: %s\n", prompt)
+	resultMsg += fmt.Sprintf("📐 Размер: %dx%d\n", width, height)
+	resultMsg += fmt.Sprintf("🔄 Шагов: %d\n", steps)
+	resultMsg += "🏳️‍🌈 ЛГБТ-тематика добавлена автоматически"
+	
+	return NewTypedString(resultMsg), nil
 }
 
-// ============================================
-// СОЦИАЛЬНЫЕ ФУНКЦИИ (СОХРАНЕНЫ)
-// ============================================
+func (i *Interpreter) generateLocalLGBTImageWithName(prompt string, width, height int, filename string) (TypedValue, error) {
+	asciiArts := []string{
+		`   🌈🌈🌈🌈🌈🌈🌈
+   🌈🌈🌈🌈🌈🌈🌈
+  🌈🌈🌈🌈🌈🌈🌈
+ 🌈🌈🌈🌈🌈🌈🌈
+🌈🌈🌈🌈🌈🌈🌈
+   🏳️‍🌈 LOVE IS LOVE 🏳️‍🌈
+   💙💚💛🧡❤️💜`,
+		`   ❤️🧡💛💚💙💜
+   ❤️🧡💛💚💙💜
+  ❤️🧡💛💚💙💜
+ ❤️🧡💛💚💙💜
+❤️🧡💛💚💙💜
+   💜 LOVE WINS 💜
+   🏳️‍🌈🏳️‍🌈🏳️‍🌈`,
+		`   🔴🟠🟡🟢🔵🟣
+   🔴🟠🟡🟢🔵🟣
+   🔴🟠🟡🟢🔵🟣
+  🔴🟠🟡🟢🔵🟣
+ 🔴🟠🟡🟢🔵🟣
+🔴🟠🟡🟢🔵🟣
+   🏳️‍🌈 PRIDE 🏳️‍🌈`,
+		`       ✨
+     ✨✨✨
+   ✨✨✨✨✨
+ ✨✨✨✨✨✨✨
+   🌈🌈🌈🌈🌈
+   🏳️‍🌈🌈🏳️‍🌈
+   💖🌈🦄🌈💖`,
+		`   🌸🌺🌻🌹🌷🌼
+   🌸🌺🌻🌹🌷🌼
+  🌸🌺🌻🌹🌷🌼
+ 🌸🌺🌻🌹🌷🌼
+🌸🌺🌻🌹🌷🌼
+   🌈 DIVERSITY 🌈
+   🏳️‍🌈🏳️‍🌈🏳️‍🌈`,
+	}
+	
+	artIndex := i.rand.Intn(len(asciiArts))
+	asciiArt := asciiArts[artIndex]
+	
+	result := fmt.Sprintf("🎨 Сгенерирован случайный ASCII-арт\n")
+	result += fmt.Sprintf("📝 Промпт: %s\n", prompt)
+	result += fmt.Sprintf("📐 Размер: %dx%d\n\n", width, height)
+	result += asciiArt
+	result += "\n\n💡 Для генерации реальных изображений установите API ключ: setSDKey('your_key')"
+	result += "\n🔑 Получить ключ: https://platform.stability.ai/account/keys"
+	
+	if !strings.HasSuffix(filename, ".txt") {
+		filename = filename + ".txt"
+	}
+	
+	if err := os.WriteFile(filename, []byte(result), 0644); err != nil {
+		return NewTypedString(result), nil
+	}
+	
+	return NewTypedString(result + fmt.Sprintf("\n\n📁 Сохранено в файл: %s", filename)), nil
+}
 
-func (i *Interpreter) findSafeSpace(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("findSafeSpace: expected at least 2 arguments (place, city)")
+func (i *Interpreter) getLGBTImageHistory(args []TypedValue) (TypedValue, error) {
+	files, err := filepath.Glob("lgbt_image_*.png")
+	if err != nil {
+		return TypedValue{}, err
 	}
-	place, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findSafeSpace: first argument must be string")
+	
+	asciiFiles, _ := filepath.Glob("lgbt_ascii_*.txt")
+	allFiles := append(files, asciiFiles...)
+	
+	if len(allFiles) == 0 {
+		return NewTypedString("📂 Нет сгенерированных изображений"), nil
 	}
-	city, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findSafeSpace: second argument must be string")
+	
+	result := fmt.Sprintf("📂 Сгенерированные изображения (%d):\n", len(allFiles))
+	for _, f := range allFiles {
+		info, _ := os.Stat(f)
+		size := info.Size() / 1024
+		result += fmt.Sprintf("  • %s (%d KB)\n", f, size)
 	}
-
-	radius := 5
-	if len(args) > 2 {
-		if r, ok := args[2].Value.(int); ok {
-			radius = r
-		}
-	}
-
-	places := []string{
-		"🏳️‍🌈 ЛГБТ-дружественное кафе 'Радуга', ул. Цветная, 15",
-		"🏳️‍🌈 Коворкинг 'Вместе', пр. Свободы, 42",
-		"🏳️‍🌈 Книжный магазин 'Открытый мир', ул. Мира, 7",
-		"🏳️‍🌈 Спортивный клуб 'Единство', ул. Спортивная, 23",
-		"🏳️‍🌈 Арт-пространство 'Толерантность', пер. Художников, 5",
-	}
-
-	result := fmt.Sprintf("🌍 Ближайшие %s в %s (радиус %d км):\n", place, city, radius)
-	for _, p := range places {
-		result += "  • " + p + "\n"
-	}
-	result += "\n💡 Проверьте актуальность информации на местных ЛГБТ-ресурсах."
-
+	
 	return NewTypedString(result), nil
 }
 
-func (i *Interpreter) getCrisisSupport(args []TypedValue) (TypedValue, error) {
+func (i *Interpreter) deleteLGBTImage(args []TypedValue) (TypedValue, error) {
 	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("getCrisisSupport: expected region argument")
+		return TypedValue{}, fmt.Errorf("deleteLGBTImage: expected filename")
 	}
-	region, ok := args[0].Value.(string)
+	filename, ok := args[0].Value.(string)
 	if !ok {
-		return TypedValue{}, fmt.Errorf("getCrisisSupport: first argument must be string")
+		return TypedValue{}, fmt.Errorf("deleteLGBTImage: first argument must be string")
 	}
-
-	supportType := "горячая_линия"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			supportType = t
-		}
+	
+	if err := os.Remove(filename); err != nil {
+		return TypedValue{}, fmt.Errorf("error deleting file: %v", err)
 	}
-
-	support := map[string]string{
-		"горячая_линия": "📞 Телефон доверия: 8-800-XXX-XX-XX (круглосуточно)",
-		"чат":           "💬 Онлайн-чат: https://lgbt-support.org/chat",
-		"психолог":      "🧠 Психологическая помощь: запись по телефону +7-XXX-XXX-XX-XX",
-		"юрист":         "⚖️ Юридическая консультация: lgbt-law@support.org",
-	}
-
-	result := fmt.Sprintf("🚨 Кризисная поддержка в регионе '%s':\n", region)
-	if info, ok := support[supportType]; ok {
-		result += "  • " + info + "\n"
-	} else {
-		result += "  • 📞 Общий телефон доверия: 8-800-XXX-XX-XX\n"
-	}
-	result += "\n💙 Вы не одиноки! Помощь доступна 24/7."
-       
-	return NewTypedString(result), nil
+	
+	return NewTypedString(fmt.Sprintf("✅ Файл '%s' удален", filename)), nil
 }
 
-func (i *Interpreter) getLGBTQLaws(args []TypedValue) (TypedValue, error) {
-	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("getLGBTQLaws: expected country argument")
-	}
-	country, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("getLGBTQLaws: first argument must be string")
-	}
+// ============================================
+// ФУНКЦИЯ createFile - создание файлов
+// ============================================
 
-	category := "права"
+func (i *Interpreter) createFile(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("createFile: expected filename")
+	}
+	
+	filename, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("createFile: first argument must be string")
+	}
+	
+	if err := i.sandbox.CheckFilePath(filename); err != nil {
+		return TypedValue{}, err
+	}
+	
+	content := ""
 	if len(args) > 1 {
 		if c, ok := args[1].Value.(string); ok {
-			category = c
+			content = c
+		} else {
+			return TypedValue{}, fmt.Errorf("createFile: second argument must be string")
 		}
 	}
-
-	laws := map[string]string{
-		"Россия":         "⚖️ В России ЛГБТ-права ограничены. Действует закон о пропаганде.",
-		"США":            "⚖️ В США однополые браки легализованы. Есть защита от дискриминации.",
-		"Великобритания": "⚖️ В Великобритании ЛГБТ+ защищены законом. Есть Equality Act.",
-		"Германия":       "⚖️ В Германии однополые браки легальны с 2017 года.",
-		"Франция":        "⚖️ Во Франции ЛГБТ+ защищены, однополые браки легальны.",
-		"Канада":         "⚖️ В Канаде однополые браки легальны с 2005 года.",
+	
+	mode := "write"
+	if len(args) > 2 {
+		if m, ok := args[2].Value.(string); ok {
+			if m == "append" || m == "write" {
+				mode = m
+			} else {
+				return TypedValue{}, fmt.Errorf("createFile: mode must be 'write' or 'append'")
+			}
+		}
 	}
-
-	result := fmt.Sprintf("📚 Информация о законодательстве в стране '%s' (категория: %s):\n", country, category)
-	if info, ok := laws[country]; ok {
-		result += "  • " + info + "\n"
+	
+	if int64(len(content)) > i.sandbox.maxFileSize {
+		return TypedValue{}, fmt.Errorf("file content too large: %d bytes (max: %d)", len(content), i.sandbox.maxFileSize)
+	}
+	
+	var err error
+	if mode == "append" {
+		f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return TypedValue{}, fmt.Errorf("error opening file for append: %v", err)
+		}
+		defer f.Close()
+		
+		_, err = f.WriteString(content)
+		if err != nil {
+			return TypedValue{}, fmt.Errorf("error appending to file: %v", err)
+		}
 	} else {
-		result += "  • ℹ️ Информация уточняется. Рекомендуем обратиться к местным ЛГБТ-организациям.\n"
+		err = os.WriteFile(filename, []byte(content), 0644)
+		if err != nil {
+			return TypedValue{}, fmt.Errorf("error writing file: %v", err)
+		}
 	}
-	result += "\n🔗 Подробнее: https://ilga.org/"
-
+	
+	info, err := os.Stat(filename)
+	if err != nil {
+		return NewTypedString(fmt.Sprintf("✅ Файл '%s' создан (размер: %d байт)", filename, len(content))), nil
+	}
+	
+	result := fmt.Sprintf("✅ Файл '%s' создан\n", filename)
+	result += fmt.Sprintf("📁 Путь: %s\n", filename)
+	result += fmt.Sprintf("📄 Размер: %d байт\n", len(content))
+	result += fmt.Sprintf("🔄 Режим: %s\n", mode)
+	result += fmt.Sprintf("📅 Время создания: %s", info.ModTime().Format("2006-01-02 15:04:05"))
+	
 	return NewTypedString(result), nil
 }
 
-func (i *Interpreter) getDailyAffirmation(args []TypedValue) (TypedValue, error) {
-	affirmations := []string{
-		"💖 Ты важен(на) и любим(а) таким(ой), какой(ая) ты есть!",
-		"🌈 Твоя идентичность — это твоя сила!",
-		"🌟 Ты заслуживаешь счастья и уважения!",
-		"💪 Ты сильнее, чем думаешь!",
-		"✨ Каждый день ты становишься ближе к своей истинной сущности!",
-		"🌸 Твоя уникальность делает мир красивее!",
-		"🌺 Ты имеешь право быть собой!",
-		"💫 Твоя любовь имеет значение!",
-		"🦋 Ты проходишь свой путь, и это прекрасно!",
-		"🌈 Ты — часть прекрасного разнообразия мира!",
-	}
+// ============================================
+// ФУНКЦИЯ runProgram - запуск внешних программ
+// ============================================
 
-	theme := "self-love"
-	if len(args) > 0 {
-		if t, ok := args[0].Value.(string); ok {
-			theme = t
+func (i *Interpreter) runProgram(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("runProgram: expected command")
+	}
+	
+	command, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("runProgram: first argument must be string")
+	}
+	
+	dangerousCommands := []string{
+		"rm", "del", "format", "mkfs", "dd", "shutdown", "reboot",
+		"systemctl", "service", "init", "poweroff", "halt",
+	}
+	
+	cmdLower := strings.ToLower(command)
+	for _, dangerous := range dangerousCommands {
+		if strings.Contains(cmdLower, dangerous) {
+			return TypedValue{}, fmt.Errorf("runProgram: command '%s' is blocked for security reasons", command)
 		}
 	}
-
-	idx := i.rand.Intn(len(affirmations))
-	return NewTypedString(fmt.Sprintf("🌟 Аффирмация дня (%s):\n%s", theme, affirmations[idx])), nil
-}
-
-func (i *Interpreter) moodCheck(args []TypedValue) (TypedValue, error) {
-	moods := []string{"тревога", "одиночество", "грусть", "страх", "радость", "спокойствие"}
-	if len(args) > 0 {
-		if m, ok := args[0].Value.([]TypedValue); ok {
-			moods = make([]string, len(m))
-			for idx, v := range m {
-				if s, ok := v.Value.(string); ok {
-					moods[idx] = s
+	
+	var argsList []string
+	if len(args) > 1 {
+		if arr, ok := args[1].Value.([]TypedValue); ok {
+			for _, arg := range arr {
+				if arg.Type == TypeString {
+					argsList = append(argsList, arg.Value.(string))
+				} else {
+					argsList = append(argsList, arg.String())
 				}
 			}
+		} else if argStr, ok := args[1].Value.(string); ok {
+			argsList = strings.Fields(argStr)
+		} else {
+			return TypedValue{}, fmt.Errorf("runProgram: second argument must be array or string")
 		}
 	}
-
-	suggestResources := true
-	if len(args) > 1 {
-		if s, ok := args[1].Value.(bool); ok {
-			suggestResources = s
+	
+	workDir := ""
+	if len(args) > 2 {
+		if dir, ok := args[2].Value.(string); ok {
+			if err := i.sandbox.CheckFilePath(dir); err != nil {
+				return TypedValue{}, err
+			}
+			workDir = dir
 		}
 	}
-
-	result := "🧠 Проверка эмоционального состояния:\n"
-	result += "📊 Отмеченные состояния: " + strings.Join(moods, ", ") + "\n\n"
-
-	if suggestResources {
-		result += "💡 Рекомендации:\n"
-		for _, mood := range moods {
-			switch mood {
-			case "тревога":
-				result += "  • 🌿 Попробуйте дыхательные упражнения (3-3-3 техника)\n"
-			case "одиночество":
-				result += "  • 🤝 Обратитесь в онлайн-чат поддержки\n"
-			case "грусть":
-				result += "  • 🎵 Послушайте вдохновляющую музыку\n"
-			case "страх":
-				result += "  • 🏠 Найдите безопасное место и дышите\n"
-			case "радость":
-				result += "  • 🎉 Поделитесь радостью с близкими!\n"
-			case "спокойствие":
-				result += "  • 🧘 Продолжайте практиковать осознанность\n"
+	
+	timeout := 30
+	if len(args) > 3 {
+		if t, ok := args[3].Value.(int); ok {
+			if t > 0 && t <= 300 {
+				timeout = t
 			}
 		}
 	}
-
-	return NewTypedString(result), nil
+	
+	var cmd *exec.Cmd
+	if len(argsList) > 0 {
+		cmd = exec.Command(command, argsList...)
+	} else {
+		cmd = exec.Command(command)
+	}
+	
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	
+	cmd.Stdout = output
+	cmd.Stderr = output
+	
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	defer cancel()
+	
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+	
+	select {
+	case err := <-done:
+		if err != nil {
+			return TypedValue{}, fmt.Errorf("runProgram: command failed: %v", err)
+		}
+		result := fmt.Sprintf("✅ Команда '%s' выполнена успешно\n", command)
+		if len(argsList) > 0 {
+			result += fmt.Sprintf("📝 Аргументы: %v\n", argsList)
+		}
+		if workDir != "" {
+			result += fmt.Sprintf("📁 Рабочая директория: %s\n", workDir)
+		}
+		result += fmt.Sprintf("⏱️ Таймаут: %d сек", timeout)
+		return NewTypedString(result), nil
+		
+	case <-ctx.Done():
+		return TypedValue{}, fmt.Errorf("runProgram: command timed out after %d seconds", timeout)
+	}
 }
 
-func (i *Interpreter) guidedBreathing(args []TypedValue) (TypedValue, error) {
-	minutes := 3
-	if len(args) > 0 {
-		if m, ok := args[0].Value.(int); ok {
-			minutes = m
-		}
-	}
-
-	theme := "calm"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			theme = t
-		}
-	}
-
-	result := fmt.Sprintf("🧘 Упражнение для снижения стресса (%d минут, тема: %s):\n", minutes, theme)
-	result += "🌬️ Следуйте инструкции:\n\n"
-
-	cycles := minutes * 6
-	for i := 0; i < cycles && i < 30; i++ {
-		result += fmt.Sprintf("  Вдох (4 сек) → Задержка (4 сек) → Выдох (6 сек) [цикл %d]\n", i+1)
-	}
-
-	result += "\n💙 Завершите упражнение. Почувствуйте, как ваше тело расслабляется."
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) defineTerm(args []TypedValue) (TypedValue, error) {
+func (i *Interpreter) fileInfo(args []TypedValue) (TypedValue, error) {
 	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("defineTerm: expected term argument")
+		return TypedValue{}, fmt.Errorf("fileInfo: expected filename")
 	}
-	term, ok := args[0].Value.(string)
+	
+	filename, ok := args[0].Value.(string)
 	if !ok {
-		return TypedValue{}, fmt.Errorf("defineTerm: first argument must be string")
+		return TypedValue{}, fmt.Errorf("fileInfo: first argument must be string")
 	}
-
-	language := "ru"
-	if len(args) > 1 {
-		if l, ok := args[1].Value.(string); ok {
-			language = l
-		}
+	
+	if err := i.sandbox.CheckFilePath(filename); err != nil {
+		return TypedValue{}, err
 	}
-
-	terms := map[string]string{
-		"небинарность": "НЕБИНАРНОСТЬ (Non-binary) — гендерная идентичность, которая не вписывается в бинарную систему мужского и женского пола.",
-		"бисексуальность": "БИСЕКСУАЛЬНОСТЬ (Bisexuality) — романтическое и/или сексуальное влечение к людям более чем одного пола.",
-		"гомосексуальность": "ГОМОСЕКСУАЛЬНОСТЬ (Homosexuality) — романтическое и/или сексуальное влечение к людям того же пола.",
-		"трансгендерность": "ТРАНСГЕНДЕРНОСТЬ (Transgender) — состояние, когда гендерная идентичность человека не совпадает с полом при рождении.",
-		"гетеросексуальность": "ГЕТЕРОСЕКСУАЛЬНОСТЬ (Heterosexuality) — романтическое и/или сексуальное влечение к людям противоположного пола.",
-		"квир": "КВИР (Queer) — зонтичный термин для ЛГБТ+ сообщества, обозначающий несоответствие нормам.",
-		"интерсекс": "ИНТЕРСЕКС (Intersex) — люди, рожденные с репродуктивными или половыми характеристиками, не вписывающимися в типичные определения мужского или женского тела.",
+	
+	info, err := os.Stat(filename)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("fileInfo: %v", err)
 	}
-
-	result := fmt.Sprintf("📖 Определение термина '%s' (язык: %s):\n", term, language)
-	if def, ok := terms[strings.ToLower(term)]; ok {
-		result += "  " + def + "\n"
-	} else {
-		result += "  ℹ️ Термин не найден. Рекомендуем обратиться к словарю ЛГБТ+ терминов.\n"
-	}
-
+	
+	result := fmt.Sprintf("📁 Информация о файле '%s':\n", filename)
+	result += fmt.Sprintf("📄 Имя: %s\n", info.Name())
+	result += fmt.Sprintf("📏 Размер: %d байт (%d KB)\n", info.Size(), info.Size()/1024)
+	result += fmt.Sprintf("📅 Изменен: %s\n", info.ModTime().Format("2006-01-02 15:04:05"))
+	result += fmt.Sprintf("🔐 Права: %v\n", info.Mode())
+	result += fmt.Sprintf("📂 Директория: %v", info.IsDir())
+	
 	return NewTypedString(result), nil
 }
 
-func (i *Interpreter) lgbtHistoryQuiz(args []TypedValue) (TypedValue, error) {
-	difficulty := "medium"
-	if len(args) > 0 {
-		if d, ok := args[0].Value.(string); ok {
-			difficulty = d
-		}
-	}
-
-	questions := []string{
-		"1. В каком году произошли Стоунволлские бунты?\n   A) 1969  B) 1975  C) 1980  D) 1990\n   Ответ: A",
-		"2. Кто был первой открытой ЛГБТ-персоной в Конгрессе США?\n   A) Харви Милк  B) Барни Фрэнк  C) Тэмми Болдуин  D) Джим Коллинз\n   Ответ: B",
-		"3. В каком году однополые браки были легализованы в США?\n   A) 2010  B) 2015  C) 2020  D) 2005\n   Ответ: B",
-		"4. Кто из этих людей был ЛГБТ-активистом?\n   A) Мартин Лютер Кинг  B) Харви Милк  C) Нельсон Мандела  D) Махатма Ганди\n   Ответ: B",
-		"5. В каком году ВОЗ исключила гомосексуальность из списка психических расстройств?\n   A) 1973  B) 1990  C) 2000  D) 1985\n   Ответ: B",
-	}
-
-	idx := i.rand.Intn(len(questions))
-	result := fmt.Sprintf("📚 Квиз по истории ЛГБТ+ (сложность: %s):\n\n", difficulty)
-	result += questions[idx] + "\n\n"
-	result += "💡 Проверьте свои знания и узнавайте больше!"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getDailyFact(args []TypedValue) (TypedValue, error) {
-	facts := []string{
-		"🏳️‍🌈 Первый парад гордости состоялся в Нью-Йорке в 1970 году.",
-		"📖 В Древней Греции гомосексуальные отношения были распространены и считались нормой.",
-		"🎨 Известный художник Леонардо да Винчи был гомосексуалом.",
-		"📚 'Сад' (The Garden) — один из первых ЛГБТ-фильмов 1968 года.",
-		"🏛️ В 1969 году Стоунволлские бунты стали поворотным моментом для ЛГБТ-движения.",
-		"🌍 Первый в мире ЛГБТ-прайд состоялся в 1970 году.",
-		"📖 В 1973 году Американская психиатрическая ассоциация исключила гомосексуальность из списка психических расстройств.",
-	}
-
-	idx := i.rand.Intn(len(facts))
-	category := "культура"
-	region := "global"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			category = c
-		}
-	}
-	if len(args) > 1 {
-		if r, ok := args[1].Value.(string); ok {
-			region = r
-		}
-	}
-
-	return NewTypedString(fmt.Sprintf("📌 Факт дня (категория: %s, регион: %s):\n%s", category, region, facts[idx])), nil
-}
-
-func (i *Interpreter) getHRTInfo(args []TypedValue) (TypedValue, error) {
-	country := "USA"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	hrtType := "MTF"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			hrtType = t
-		}
-	}
-
-	result := fmt.Sprintf("🏥 Информация о гормональной терапии (страна: %s, тип: %s):\n", country, hrtType)
-	result += "\n📋 Основная информация:\n"
-	result += "  • Гормональная терапия проводится под наблюдением эндокринолога\n"
-	result += "  • Требуется регулярная сдача анализов крови\n"
-	result += "  • Эффект проявляется в течение 3-6 месяцев\n\n"
-
-	result += "🔍 Рекомендации:\n"
-	result += "  • Обратитесь к ЛГБТ-дружественному эндокринологу\n"
-	result += "  • Получите направление от психотерапевта (по требованиям страны)\n"
-	result += "  • Обсудите все риски и побочные эффекты с врачом\n"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) findLGBTDoctor(args []TypedValue) (TypedValue, error) {
+func (i *Interpreter) copyFile(args []TypedValue) (TypedValue, error) {
 	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("findLGBTDoctor: expected specialty and city")
+		return TypedValue{}, fmt.Errorf("copyFile: expected source and destination")
 	}
-	specialty, ok := args[0].Value.(string)
+	
+	src, ok := args[0].Value.(string)
 	if !ok {
-		return TypedValue{}, fmt.Errorf("findLGBTDoctor: first argument must be string")
+		return TypedValue{}, fmt.Errorf("copyFile: first argument must be string")
 	}
-	city, ok := args[1].Value.(string)
+	
+	dst, ok := args[1].Value.(string)
 	if !ok {
-		return TypedValue{}, fmt.Errorf("findLGBTDoctor: second argument must be string")
+		return TypedValue{}, fmt.Errorf("copyFile: second argument must be string")
 	}
-
-	doctors := []string{
-		"👨‍⚕️ Иванова Е.П. (терапевт) - клиника 'Здоровье', ул. Ленина, 10",
-		"👩‍⚕️ Петров С.М. (гинеколог) - центр 'Женское здоровье', пр. Мира, 25",
-		"👨‍⚕️ Сидорова А.А. (эндокринолог) - клиника 'Гармония', ул. Садовая, 5",
-		"👩‍⚕️ Козлова Н.В. (психотерапевт) - центр 'Поддержка', ул. Свободы, 42",
-		"👨‍⚕️ Морозов Д.И. (уролог) - клиника 'Здоровье мужчины', ул. Спортивная, 15",
+	
+	if err := i.sandbox.CheckFilePath(src); err != nil {
+		return TypedValue{}, err
 	}
-
-	result := fmt.Sprintf("🏥 ЛГБТ-дружественные врачи (%s) в городе %s:\n", specialty, city)
-	for _, doc := range doctors {
-		result += "  • " + doc + "\n"
+	if err := i.sandbox.CheckFilePath(dst); err != nil {
+		return TypedValue{}, err
 	}
-	result += "\n💡 Уточните информацию о приеме по телефону клиники."
-
-	return NewTypedString(result), nil
+	
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("error opening source: %v", err)
+	}
+	defer srcFile.Close()
+	
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("error creating destination: %v", err)
+	}
+	defer dstFile.Close()
+	
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("error copying: %v", err)
+	}
+	
+	return NewTypedString(fmt.Sprintf("✅ Файл скопирован: %s -> %s", src, dst)), nil
 }
 
-func (i *Interpreter) getDocumentChangeGuide(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("getDocumentChangeGuide: expected country and document type")
+func (i *Interpreter) deleteFile(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("deleteFile: expected filename")
 	}
-	country, ok := args[0].Value.(string)
+	
+	filename, ok := args[0].Value.(string)
 	if !ok {
-		return TypedValue{}, fmt.Errorf("getDocumentChangeGuide: first argument must be string")
-	}
-	document, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("getDocumentChangeGuide: second argument must be string")
-	}
-
-	guide := map[string]string{
-		"паспорт": "Для смены паспорта необходимы: заявление, медицинское заключение, новый паспорт.",
-		"свидетельство": "Для смены свидетельства о рождении требуется решение суда.",
-		"водительские": "Для смены водительского удостоверения необходимо заявление в ГИБДД.",
-	}
-
-	result := fmt.Sprintf("📄 Инструкция по смене документа '%s' в стране '%s':\n", document, country)
-	if info, ok := guide[document]; ok {
-		result += "  • " + info + "\n"
-	} else {
-		result += "  • ℹ️ Информация уточняется. Рекомендуем обратиться к юристу.\n"
-	}
-	result += "\n⚖️ Рекомендуем получить юридическую консультацию."
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQEvents(args []TypedValue) (TypedValue, error) {
-	days := 30
-	if len(args) > 0 {
-		if d, ok := args[0].Value.(int); ok {
-			days = d
-		}
-	}
-
-	eventType := "online"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			eventType = t
-		}
-	}
-
-	events := []string{
-		"🏳️‍🌈 Онлайн-встреча 'Разговор о важном' - 15 марта, 19:00",
-		"📚 Книжный клуб 'Радужные страницы' - каждую субботу, 16:00",
-		"🎨 Арт-терапия 'Вырази себя' - 20 марта, 18:00",
-		"💬 Группа поддержки 'Вместе' - по вторникам, 20:00",
-		"🏳️‍⚧️ Транс-встреча 'Голоса' - 25 марта, 19:30",
-	}
-
-	result := fmt.Sprintf("📅 Ближайшие ЛГБТ+ мероприятия (следующие %d дней, тип: %s):\n", days, eventType)
-	for _, event := range events {
-		result += "  • " + event + "\n"
-	}
-	result += "\n🔗 Подробнее на https://lgbt-events.org"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) createLGBTQGroup(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("createLGBTQGroup: expected name and meeting type")
-	}
-	name, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("createLGBTQGroup: first argument must be string")
-	}
-	meetingType, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("createLGBTQGroup: second argument must be string")
-	}
-
-	result := fmt.Sprintf("🌈 Группа '%s' создана!\n", name)
-	result += "📋 Информация о группе:\n"
-	result += "  • Тип встреч: " + meetingType + "\n"
-	result += "  • Статус: активна\n"
-	result += "  • Участников: 0\n\n"
-	result += "🔗 Ссылка для присоединения: https://lgbt-groups.org/join/" + strings.ReplaceAll(strings.ToLower(name), " ", "-")
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) findVolunteerOpportunity(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("findVolunteerOpportunity: expected organization and skills")
-	}
-	organization, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findVolunteerOpportunity: first argument must be string")
-	}
-	skills, ok := args[1].Value.([]TypedValue)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findVolunteerOpportunity: second argument must be array")
-	}
-
-	skillsList := make([]string, len(skills))
-	for i, s := range skills {
-		if str, ok := s.Value.(string); ok {
-			skillsList[i] = str
-		}
-	}
-
-	opportunities := []string{
-		"📱 Помощь в ведении социальных сетей",
-		"📞 Оператор горячей линии поддержки",
-		"📝 Юридическая помощь ЛГБТ+",
-		"🎓 Проведение образовательных лекций",
-		"🎨 Организация культурных мероприятий",
-	}
-
-	result := fmt.Sprintf("🤝 Волонтерские возможности в организации '%s':\n", organization)
-	result += "Ваши навыки: " + strings.Join(skillsList, ", ") + "\n\n"
-	result += "📋 Доступные позиции:\n"
-	for _, opp := range opportunities {
-		result += "  • " + opp + "\n"
-	}
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQBook(args []TypedValue) (TypedValue, error) {
-	genre := "фантастика"
-	if len(args) > 0 {
-		if g, ok := args[0].Value.(string); ok {
-			genre = g
-		}
-	}
-
-	books := []string{
-		"📚 'Имя ветра' - Патрик Ротфусс (фантастика, ЛГБТ+ персонажи)",
-		"📚 'Гарри Поттер' - Джоан Роулинг (фэнтези с ЛГБТ+ подтекстом)",
-		"📚 'Орландо' - Вирджиния Вулф (классика, гендерная тематика)",
-		"📚 'Моррис' - Эдвард Форстер (ЛГБТ+ классика)",
-		"📚 'Месяц в глуши' - Эллен Хопкинс (современная проза)",
-	}
-
-	idx := i.rand.Intn(len(books))
-	return NewTypedString(fmt.Sprintf("📖 Рекомендуемая книга (жанр: %s):\n%s", genre, books[idx])), nil
-}
-
-func (i *Interpreter) getLGBTQPlaylist(args []TypedValue) (TypedValue, error) {
-	mood := "empowerment"
-	if len(args) > 0 {
-		if m, ok := args[0].Value.(string); ok {
-			mood = m
-		}
-	}
-
-	playlists := map[string]string{
-		"empowerment": "🎵 Плейлист 'Сила и гордость': Lady Gaga, Beyoncé, Madonna, Freddie Mercury",
-		"relaxation":  "🎵 Плейлист 'Спокойствие': Enya, Vangelis, Ludovico Einaudi",
-		"energy":      "🎵 Плейлист 'Энергия': Daft Punk, The Chemical Brothers, Prodigy",
-		"sad":         "🎵 Плейлист 'Меланхолия': Adele, Sam Smith, ЛГБТ-исполнители",
-		"love":        "🎵 Плейлист 'Любовь': Elton John, Freddie Mercury, George Michael",
-	}
-
-	result := fmt.Sprintf("🎶 Плейлист по настроению '%s':\n", mood)
-	if playlist, ok := playlists[mood]; ok {
-		result += "  " + playlist + "\n"
-	} else {
-		result += "  🎵 Рекомендуем: ЛГБТ+ исполнители разных жанров\n"
-	}
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQMovies(args []TypedValue) (TypedValue, error) {
-	genre := "романтика"
-	if len(args) > 0 {
-		if g, ok := args[0].Value.(string); ok {
-			genre = g
-		}
-	}
-
-	movies := []string{
-		"🎬 'Горбатая гора' (2005) - драма, романтика",
-		"🎬 'Кэрол' (2015) - драма, романтика",
-		"🎬 'Парень с соседнего кладбища' (2018) - комедия, романтика",
-		"🎬 'С тобой или без тебя' (2020) - драма",
-		"🎬 'Король Фредерик' (2020) - историческая драма",
-	}
-
-	idx := i.rand.Intn(len(movies))
-	return NewTypedString(fmt.Sprintf("🎥 Рекомендуемый фильм (жанр: %s):\n%s", genre, movies[idx])), nil
-}
-
-func (i *Interpreter) getPrideParadeInfo(args []TypedValue) (TypedValue, error) {
-	city := "global"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			city = c
-		}
-	}
-
-	year := time.Now().Year()
-	if len(args) > 1 {
-		if y, ok := args[1].Value.(int); ok {
-			year = y
-		}
-	}
-
-	parades := map[string]string{
-		"москва":   "🏳️‍🌈 Московский прайд: июнь 2026, ул. Тверская",
-		"спб":      "🏳️‍🌈 Санкт-Петербургский прайд: июль 2026, Невский проспект",
-		"нью-йорк": "🏳️‍🌈 NYC Pride: июнь 2026, Манхэттен",
-		"лондон":   "🏳️‍🌈 London Pride: июль 2026, центр Лондона",
-		"берлин":   "🏳️‍🌈 Berlin Pride (CSD): июль 2026, Бранденбургские ворота",
-		"париж":    "🏳️‍🌈 Paris Pride: июнь 2026, Марсово поле",
-		"сидней":   "🏳️‍🌈 Sydney Mardi Gras: февраль-март 2026, Оксфорд-стрит",
-		"токио":    "🏳️‍🌈 Tokyo Rainbow Pride: апрель 2026, парк Ёёги",
-		"сан-франциско": "🏳️‍🌈 SF Pride: июнь 2026, Маркет-стрит",
-		"афины":    "🏳️‍🌈 Athens Pride: июнь 2026, площадь Синтагма",
-	}
-
-	result := fmt.Sprintf("🏳️‍🌈 Информация о парадах гордости (%s, %d год):\n", city, year)
-	
-	if info, ok := parades[strings.ToLower(city)]; ok {
-		result += "  • " + info + "\n"
-	} else {
-		result += "  • ℹ️ Информация о параде в этом городе уточняется\n"
+		return TypedValue{}, fmt.Errorf("deleteFile: first argument must be string")
 	}
 	
-	result += "\n📅 Рекомендуем проверить даты на официальных сайтах прайд-организаций."
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getComingOutTips(args []TypedValue) (TypedValue, error) {
-	audience := "родители"
-	if len(args) > 0 {
-		if a, ok := args[0].Value.(string); ok {
-			audience = a
-		}
-	}
-
-	tips := map[string]string{
-		"родители": "👨‍👩‍👦 Советы для каминг-аута перед родителями:\n" +
-			"  • Выберите спокойное время для разговора\n" +
-			"  • Будьте готовы к вопросам и эмоциям\n" +
-			"  • Напомните им, что вы все еще их ребенок\n" +
-			"  • Дайте им время на осмысление",
-		"друзья": "👫 Советы для каминг-аута перед друзьями:\n" +
-			"  • Начните с самых близких друзей\n" +
-			"  • Будьте честны и открыты\n" +
-			"  • Дайте им понять, что вы доверяете им",
-		"работа": "💼 Советы для каминг-аута на работе:\n" +
-			"  • Проверьте политику компании по ЛГБТ+\n" +
-			"  • Поговорите с HR или доверенным менеджером\n" +
-			"  • Оцените риски в вашей стране",
-		"школа": "🏫 Советы для каминг-аута в школе:\n" +
-			"  • Найдите поддерживающего учителя или психолога\n" +
-			"  • Убедитесь, что школа поддерживает ЛГБТ+\n" +
-			"  • Не торопитесь, делайте это в своем темпе",
-	}
-
-	result := fmt.Sprintf("💡 Советы по каминг-ауту (аудитория: %s):\n", audience)
-	
-	if tipsContent, ok := tips[strings.ToLower(audience)]; ok {
-		result += tipsContent + "\n"
-	} else {
-		result += "  • ℹ️ Общие советы по каминг-ауту:\n"
-		result += "  • Будьте собой и доверяйте своим чувствам\n"
-		result += "  • Ищите поддержку в ЛГБТ+ сообществе\n"
+	if err := i.sandbox.CheckFilePath(filename); err != nil {
+		return TypedValue{}, err
 	}
 	
-	result += "\n🔗 Дополнительная поддержка: https://comingout.org"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getTransHealthcare(args []TypedValue) (TypedValue, error) {
-	country := "россия"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	healthcareInfo := map[string]string{
-		"россия": "🏳️‍⚧️ Транс-здравоохранение в России:\n" +
-			"  • Гендерно-аффирмативная помощь ограничена\n" +
-			"  • Требуется психиатрическое заключение\n" +
-			"  • Гормональная терапия доступна после диагноза\n" +
-			"  • Ресурсы: Транс-Альянс, Транс-Помощь",
-		"сша": "🏳️‍⚧️ Транс-здравоохранение в США:\n" +
-			"  • Широкий доступ к гендерно-аффирмативной помощи\n" +
-			"  • Медицинское страхование часто покрывает лечение\n" +
-			"  • Доступны клиники, специализирующиеся на транс-здоровье",
-		"великобритания": "🏳️‍⚧️ Транс-здравоохранение в Великобритании:\n" +
-			"  • NHS предоставляет гендерно-аффирмативную помощь\n" +
-			"  • Возможны длительные очереди\n" +
-			"  • Существуют частные клиники",
-		"германия": "🏳️‍⚧️ Транс-здравоохранение в Германии:\n" +
-			"  • Страховка покрывает гендерно-аффирмативную помощь\n" +
-			"  • Доступны специализированные центры\n" +
-			"  • Требуется психиатрическое заключение",
-	}
-
-	result := "🏥 Информация о транс-здравоохранении:\n"
-	if info, ok := healthcareInfo[strings.ToLower(country)]; ok {
-		result += info + "\n"
-	} else {
-		result += "  • ℹ️ Информация для этой страны уточняется\n"
+	if _, err := os.Stat(filename); err != nil {
+		return TypedValue{}, fmt.Errorf("deleteFile: file not found: %v", err)
 	}
 	
-	result += "\n💡 Рекомендуем обратиться к местным транс-организациям."
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) findLGBTQShelter(args []TypedValue) (TypedValue, error) {
-	location := "москва"
-	if len(args) > 0 {
-		if l, ok := args[0].Value.(string); ok {
-			location = l
-		}
-	}
-
-	shelters := []string{
-		"🏠 ЛГБТ-убежище 'Свет' - круглосуточная поддержка",
-		"🏠 Приют для ЛГБТ+ молодежи 'Надежда'",
-		"🏠 Центр временного проживания 'Радужный дом'",
-		"🏠 Кризисный центр для ЛГБТ 'Вместе'",
-	}
-
-	result := fmt.Sprintf("🏠 ЛГБТ-убежища и приюты в регионе '%s':\n", location)
-	for _, shelter := range shelters {
-		result += "  • " + shelter + "\n"
-	}
-	result += "\n📞 Телефон кризисной поддержки: 8-800-XXX-XX-XX"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getIntersexResources(args []TypedValue) (TypedValue, error) {
-	country := "global"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	resources := "🌍 Ресурсы для интерсекс-людей:\n" +
-		"  • OII (Organization Intersex International)\n" +
-		"  • InterACT - защита прав интерсекс-молодежи\n" +
-		"  • Ресурсы по медицинской помощи\n" +
-		"  • Группы поддержки для интерсекс-людей\n"
-
-	if country != "global" {
-		resources += fmt.Sprintf("\n📍 Ресурсы в стране '%s' уточняются.\n", country)
-	}
-
-	return NewTypedString(resources), nil
-}
-
-func (i *Interpreter) getNonbinaryGuide(args []TypedValue) (TypedValue, error) {
-	guide := "💜 Гид для небинарных людей:\n\n" +
-		"📝 Идентичность:\n" +
-		"  • Небинарность - гендерная идентичность вне бинарной системы\n" +
-		"  • Может включать: агендерность, бигендерность, гендерфлюидность\n" +
-		"  • У каждого свой уникальный опыт\n\n" +
-		"🔤 Язык и местоимения:\n" +
-		"  • Местоимения: они/их, ze/zir, или другие\n" +
-		"  • Важно уважать выбор человека\n\n" +
-		"💡 Советы:\n" +
-		"  • Найдите поддерживающее сообщество\n" +
-		"  • Практикуйте самовыражение в безопасной среде\n" +
-		"  • Помните, что ваша идентичность валидна"
-
-	return NewTypedString(guide), nil
-}
-
-func (i *Interpreter) findLGBTQTherapist(args []TypedValue) (TypedValue, error) {
-	specialty := "психотерапевт"
-	if len(args) > 0 {
-		if s, ok := args[0].Value.(string); ok {
-			specialty = s
-		}
-	}
-
-	location := "онлайн"
-	if len(args) > 1 {
-		if l, ok := args[1].Value.(string); ok {
-			location = l
-		}
-	}
-
-	therapists := []string{
-		"🧠 Специалист по ЛГБТ+ вопросам - онлайн-консультации",
-		"🧠 Терапевт с опытом работы с транс-людьми",
-		"🧠 Психолог для небинарных и гендерно-неконформных людей",
-		"🧠 Семейный терапевт для ЛГБТ+ семей",
-		"🧠 Кризисный психолог - поддержка при каминг-ауте",
-	}
-
-	result := fmt.Sprintf("🧠 ЛГБТ-дружественные терапевты (%s, %s):\n", specialty, location)
-	for _, therapist := range therapists {
-		result += "  • " + therapist + "\n"
-	}
-	result += "\n💡 Проверьте лицензию и отзывы перед обращением"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getAsylumInfo(args []TypedValue) (TypedValue, error) {
-	country := "россия"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	info := "🛂 Информация о получении убежища для ЛГБТ+:\n\n" +
-		"📋 Требования:\n" +
-		"  • Доказательства преследования по признаку ориентации\n" +
-		"  • Медицинские документы (при необходимости)\n" +
-		"  • Письма поддержки от ЛГБТ-организаций\n\n" +
-		"📍 Страны для убежища:\n" +
-		"  • Канада - программа защиты ЛГБТ-беженцев\n" +
-		"  • Великобритания - специальные программы\n" +
-		"  • Германия - поддержка квир-беженцев\n" +
-		"  • США - убежище для преследуемых ЛГБТ+\n"
-
-	if country != "россия" {
-		info += fmt.Sprintf("\n📍 Информация для страны '%s' уточняется.\n", country)
-	}
-
-	return NewTypedString(info), nil
-}
-
-func (i *Interpreter) getAsexualResources(args []TypedValue) (TypedValue, error) {
-	resources := "🤍 Ресурсы для асексуальных людей:\n\n" +
-		"📖 Определение:\n" +
-		"  • Асексуальность - отсутствие сексуального влечения\n" +
-		"  • Спектр: демисексуальность, грей-сексуальность\n" +
-		"  • Аромантизм - отсутствие романтического влечения\n\n" +
-		"💡 Сообщество:\n" +
-		"  • AVEN (Asexual Visibility and Education Network)\n" +
-		"  • Группы поддержки для асексуалов\n" +
-		"  • Онлайн-форумы и чаты\n\n" +
-		"📚 Ресурсы:\n" +
-		"  • Книги и статьи об асексуальности\n" +
-		"  • Документальные фильмы\n" +
-		"  • Подкасты"
-
-	return NewTypedString(resources), nil
-}
-
-func (i *Interpreter) getPolyamoryGuide(args []TypedValue) (TypedValue, error) {
-	guide := "💕 Гид по полиамории и этичной немоногамии:\n\n" +
-		"📖 Основные концепции:\n" +
-		"  • Этичная немоногамия - отношения с согласием всех участников\n" +
-		"  • Полиамория - возможность любить нескольких людей\n" +
-		"  • Различные модели: иерархическая, неиерархическая\n\n" +
-		"⚖️ Правила и границы:\n" +
-		"  • Открытая коммуникация\n" +
-		"  • Честность и прозрачность\n" +
-		"  • Уважение к потребностям каждого\n\n" +
-		"💡 Ресурсы:\n" +
-		"  • Книга 'Этичный шлюха'\n" +
-		"  • Сообщества и группы поддержки\n" +
-		"  • Психологи, специализирующиеся на немоногамии"
-
-	return NewTypedString(guide), nil
-}
-
-func (i *Interpreter) getGenderAffirmingCare(args []TypedValue) (TypedValue, error) {
-	country := "россия"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	info := "🏳️‍⚧️ Гендерно-аффирмативная помощь:\n\n" +
-		"🩺 Медицинские услуги:\n" +
-		"  • Гормональная терапия\n" +
-		"  • Хирургические операции\n" +
-		"  • Логопедия для коррекции голоса\n" +
-		"  • Электроэпиляция\n\n" +
-		"🧠 Психологическая поддержка:\n" +
-		"  • Терапия с ЛГБТ-дружественным психологом\n" +
-		"  • Группы поддержки\n" +
-		"  • Консультации по социальному переходу\n\n" +
-		"⚖️ Юридическая помощь:\n" +
-		"  • Смена документов\n" +
-		"  • Защита прав на рабочем месте"
-
-	if country != "россия" {
-		info += fmt.Sprintf("\n📍 Информация для страны '%s' уточняется.\n", country)
-	}
-
-	return NewTypedString(info), nil
-}
-
-func (i *Interpreter) findLGBTQCommunity(args []TypedValue) (TypedValue, error) {
-	interest := "общий"
-	if len(args) > 0 {
-		if i2, ok := args[0].Value.(string); ok {
-			interest = i2
-		}
-	}
-
-	communities := map[string]string{
-		"спорт": "🏋️‍♀️ Спортивные ЛГБТ+ сообщества: клубы по футболу, волейболу, плаванию",
-		"искусство": "🎨 Арт-сообщества: ЛГБТ+ художники, писатели, музыканты",
-		"технологии": "💻 ЛГБТ+ в IT: сообщества разработчиков, дизайнеров",
-		"образование": "📚 Образовательные сообщества: клубы, лекции, тренинги",
-		"активизм": "✊ Активистские группы: защита прав, протесты, кампании",
-		"здоровье": "🏥 ЛГБТ+ в здравоохранении: врачи, психологи, поддержка",
-		"бизнес": "💼 ЛГБТ+ предприниматели: стартапы, нетворкинг",
-		"религия": "🕊️ Инклюзивные религиозные общины",
-		"родители": "👨‍👩‍👧 ЛГБТ-родители и семьи",
-		"молодежь": "🧒 ЛГБТ+ молодежные организации",
-	}
-
-	result := fmt.Sprintf("👥 ЛГБТ+ сообщества по интересам: %s\n", interest)
-	
-	if communitiesContent, ok := communities[strings.ToLower(interest)]; ok {
-		result += "  • " + communitiesContent + "\n"
-	} else {
-		result += "  • Общие ЛГБТ+ сообщества: встречи, группы поддержки, мероприятия\n"
+	err := os.Remove(filename)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("error deleting file: %v", err)
 	}
 	
-	result += "\n🔗 Поищите в социальных сетях и на платформах для ЛГБТ+"
-
-	return NewTypedString(result), nil
+	return NewTypedString(fmt.Sprintf("✅ Файл '%s' удален", filename)), nil
 }
 
-func (i *Interpreter) getLGBTQHistory(args []TypedValue) (TypedValue, error) {
-	era := "общая"
-	if len(args) > 0 {
-		if e, ok := args[0].Value.(string); ok {
-			era = e
-		}
-	}
+// ============================================
+// ВСТРОЕННЫЕ ФУНКЦИИ
+// ============================================
 
-	history := map[string]string{
-		"общая": "📜 Основные вехи ЛГБТ+ истории:\n" +
-			"  • 1969 - Стоунволлские бунты\n" +
-			"  • 1973 - Исключение гомосексуальности из DSM\n" +
-			"  • 2015 - Легализация однополых браков в США\n" +
-			"  • 2023 - Все больше стран легализуют однополые браки",
-		"древний": "🏛️ Древняя история:\n" +
-			"  • Древняя Греция - гомосексуальные отношения\n" +
-			"  • Древний Рим - разнообразие сексуальных практик\n" +
-			"  • Индия - историческое признание третьего пола",
-		"средневековье": "⚔️ Средневековье:\n" +
-			"  • Преследование за гомосексуальность\n" +
-			"  • Подпольные ЛГБТ+ сообщества\n" +
-			"  • Религиозные запреты",
-		"новое": "🌍 Новейшая история:\n" +
-			"  • ЛГБТ+ движение\n" +
-			"  • Достижения в правах ЛГБТ+\n" +
-			"  • Современные вызовы",
-	}
-
-	result := fmt.Sprintf("📚 ЛГБТ+ история (эпоха: %s):\n", era)
-	
-	if historyContent, ok := history[strings.ToLower(era)]; ok {
-		result += historyContent + "\n"
-	} else {
-		result += "  • История ЛГБТ+ разнообразна и богата\n"
-	}
-	
-	result += "\n📖 Рекомендуем книги и фильмы по ЛГБТ+ истории"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQParenting(args []TypedValue) (TypedValue, error) {
-	parenting := "👨‍👩‍👧 Информация для ЛГБТ-родителей:\n\n" +
-		"📋 Пути создания семьи:\n" +
-		"  • Суррогатное материнство\n" +
-		"  • Усыновление\n" +
-		"  • Донорство\n" +
-		"  • Воспитание детей от предыдущих отношений\n\n" +
-		"⚖️ Юридические вопросы:\n" +
-		"  • Права обоих родителей\n" +
-		"  • Усыновление в разных странах\n" +
-		"  • Регистрация брака для защиты прав\n\n" +
-		"💡 Поддержка:\n" +
-		"  • Группы для ЛГБТ-родителей\n" +
-		"  • Ресурсы для детей из ЛГБТ-семей\n" +
-		"  • Консультации специалистов"
-
-	return NewTypedString(parenting), nil
-}
-
-func (i *Interpreter) getConversionTherapyHelp(args []TypedValue) (TypedValue, error) {
-	help := "🚫 Помощь жертвам конверсионной терапии:\n\n" +
-		"📋 Что это:\n" +
-		"  • Попытки изменить сексуальную ориентацию\n" +
-		"  • Псевдонаучные методы\n" +
-		"  • Запрещена во многих странах\n\n" +
-		"💡 Что делать:\n" +
-		"  • Обратитесь за помощью к профессионалам\n" +
-		"  • Найдите поддержку в ЛГБТ+ сообществе\n" +
-		"  • Подайте жалобу в соответствующие органы\n\n" +
-		"📞 Горячие линии:\n" +
-		"  • Линия поддержки жертв конверсионной терапии\n" +
-		"  • Психологическая помощь\n" +
-		"  • Юридическая консультация"
-
-	return NewTypedString(help), nil
-}
-
-func (i *Interpreter) getLGBTQHousing(args []TypedValue) (TypedValue, error) {
-	location := "москва"
-	if len(args) > 0 {
-		if l, ok := args[0].Value.(string); ok {
-			location = l
-		}
-	}
-
-	housing := fmt.Sprintf("🏠 ЛГБТ-дружественное жилье в %s:\n\n", location) +
-		"🏢 Варианты:\n" +
-		"  • ЛГБТ-дружественные общежития\n" +
-		"  • Комнаты с квир-соседями\n" +
-		"  • Квартиры в инклюзивных районах\n" +
-		"  • Временные приюты\n\n" +
-		"🔍 Как искать:\n" +
-		"  • Специализированные платформы для ЛГБТ+\n" +
-		"  • Группы в социальных сетях\n" +
-		"  • Рекомендации от ЛГБТ-организаций\n\n" +
-		"⚖️ Права:\n" +
-		"  • Защита от дискриминации\n" +
-		"  • Юридическая помощь"
-
-	return NewTypedString(housing), nil
-}
-
-func (i *Interpreter) getQueerArt(args []TypedValue) (TypedValue, error) {
-	medium := "все"
-	if len(args) > 0 {
-		if m, ok := args[0].Value.(string); ok {
-			medium = m
-		}
-	}
-
-	art := fmt.Sprintf("🎨 Квир-искусство (медиум: %s):\n\n", medium) +
-		"🎭 Художники:\n" +
-		"  • Фрида Кало - символика и идентичность\n" +
-		"  • Кит Харинг - активистское искусство\n" +
-		"  • Дэвид Хокни - квир-живопись\n" +
-		"  • Zanele Muholi - фотография квир-сообществ\n\n" +
-		"📚 Направления:\n" +
-		"  • Квир-живопись и скульптура\n" +
-		"  • Фотография и инсталляции\n" +
-		"  • Перформанс и видео-арт\n" +
-		"  • Квир-литература\n\n" +
-		"🎬 Где смотреть:\n" +
-		"  • ЛГБТ+ кинофестивали\n" +
-		"  • Выставки в музеях\n" +
-		"  • Онлайн-галереи"
-
-	return NewTypedString(art), nil
-}
-
-func (i *Interpreter) getLGBTQFriendlyCities(args []TypedValue) (TypedValue, error) {
-	criteria := "общий"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			criteria = c
-		}
-	}
-
-	cities := map[string]string{
-		"общий": "🌍 ЛГБТ-дружественные города мира:\n" +
-			"  • Сан-Франциско (США)\n" +
-			"  • Амстердам (Нидерланды)\n" +
-			"  • Берлин (Германия)\n" +
-			"  • Торонто (Канада)\n" +
-			"  • Сидней (Австралия)\n" +
-			"  • Монреаль (Канада)\n" +
-			"  • Копенгаген (Дания)",
-		"европа": "🌍 ЛГБТ-дружественные города Европы:\n" +
-			"  • Амстердам\n" +
-			"  • Берлин\n" +
-			"  • Копенгаген\n" +
-			"  • Лондон\n" +
-			"  • Мадрид",
-		"азия": "🌍 ЛГБТ-дружественные города Азии:\n" +
-			"  • Токио (Япония)\n" +
-			"  • Сеул (Южная Корея)\n" +
-			"  • Тайбэй (Тайвань)\n" +
-			"  • Манила (Филиппины)",
-		"америка": "🌍 ЛГБТ-дружественные города Америки:\n" +
-			"  • Сан-Франциско\n" +
-			"  • Торонто\n" +
-			"  • Нью-Йорк\n" +
-			"  • Монреаль\n" +
-			"  • Буэнос-Айрес",
-	}
-
-	result := fmt.Sprintf("🌍 ЛГБТ-дружественные города (категория: %s):\n", criteria)
-	
-	if citiesContent, ok := cities[strings.ToLower(criteria)]; ok {
-		result += citiesContent + "\n"
-	} else {
-		result += "  • Информация по этой категории уточняется\n"
-	}
-	
-	result += "\n💡 Рейтинги основаны на законах, культуре и ЛГБТ-жизни"
-
-	return NewTypedString(result), nil
-}
-
-// ---------- Встроенные функции ----------
 func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (TypedValue, error), bool) {
 	builtins := map[string]func([]TypedValue) (TypedValue, error){
 		"readFile": func(args []TypedValue) (TypedValue, error) {
@@ -3981,11 +2926,11 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 				return TypedValue{}, fmt.Errorf("readFile: argument must be string")
 			}
 			filename := args[0].Value.(string)
-
+			
 			if err := i.sandbox.CheckFilePath(filename); err != nil {
 				return TypedValue{}, err
 			}
-
+			
 			info, err := os.Stat(filename)
 			if err != nil {
 				return TypedValue{}, err
@@ -3993,7 +2938,7 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 			if info.Size() > i.sandbox.maxFileSize {
 				return TypedValue{}, fmt.Errorf("file too large: %d bytes (max: %d)", info.Size(), i.sandbox.maxFileSize)
 			}
-
+			
 			data, err := os.ReadFile(filename)
 			if err != nil {
 				return TypedValue{}, err
@@ -4011,16 +2956,16 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 				return TypedValue{}, fmt.Errorf("writeFile: second argument must be string")
 			}
 			filename := args[0].Value.(string)
-
+			
 			if err := i.sandbox.CheckFilePath(filename); err != nil {
 				return TypedValue{}, err
 			}
-
+			
 			content := args[1].Value.(string)
 			if int64(len(content)) > i.sandbox.maxFileSize {
 				return TypedValue{}, fmt.Errorf("content too large: %d bytes (max: %d)", len(content), i.sandbox.maxFileSize)
 			}
-
+			
 			err := os.WriteFile(filename, []byte(content), 0644)
 			return TypedValue{Type: TypeNull, Value: nil}, err
 		},
@@ -4043,11 +2988,11 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 				return TypedValue{}, fmt.Errorf("getDirFiles: argument must be string")
 			}
 			dir := args[0].Value.(string)
-
+			
 			if err := i.sandbox.CheckFilePath(dir); err != nil {
 				return TypedValue{}, err
 			}
-
+			
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				return TypedValue{}, err
@@ -4327,22 +3272,22 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 				return TypedValue{}, fmt.Errorf("httpGet: argument must be string")
 			}
 			url := args[0].Value.(string)
-
+			
 			if err := i.sandbox.CheckURL(url); err != nil {
 				return TypedValue{}, err
 			}
-
+			
 			client := &http.Client{Timeout: 30 * time.Second}
 			resp, err := client.Get(url)
 			if err != nil {
 				return TypedValue{}, err
 			}
 			defer resp.Body.Close()
-
+			
 			if resp.StatusCode != http.StatusOK {
 				return TypedValue{}, fmt.Errorf("HTTP error: %s", resp.Status)
 			}
-
+			
 			body, err := io.ReadAll(io.LimitReader(resp.Body, i.sandbox.maxFileSize))
 			if err != nil {
 				return TypedValue{}, err
@@ -4358,22 +3303,22 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 			}
 			url := args[0].Value.(string)
 			data := args[1].Value.(string)
-
+			
 			if err := i.sandbox.CheckURL(url); err != nil {
 				return TypedValue{}, err
 			}
-
+			
 			client := &http.Client{Timeout: 30 * time.Second}
 			resp, err := client.Post(url, "application/json", strings.NewReader(data))
 			if err != nil {
 				return TypedValue{}, err
 			}
 			defer resp.Body.Close()
-
+			
 			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 				return TypedValue{}, fmt.Errorf("HTTP error: %s", resp.Status)
 			}
-
+			
 			body, err := io.ReadAll(io.LimitReader(resp.Body, i.sandbox.maxFileSize))
 			if err != nil {
 				return TypedValue{}, err
@@ -4388,17 +3333,17 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 				return TypedValue{}, fmt.Errorf("jsonParse: argument must be string")
 			}
 			jsonStr := args[0].Value.(string)
-
+			
 			if int64(len(jsonStr)) > i.sandbox.maxFileSize {
 				return TypedValue{}, fmt.Errorf("JSON too large: %d bytes", len(jsonStr))
 			}
-
+			
 			var result interface{}
 			err := json.Unmarshal([]byte(jsonStr), &result)
 			if err != nil {
 				return TypedValue{}, fmt.Errorf("invalid JSON: %v", err)
 			}
-
+			
 			return i.jsonToTypedValue(result), nil
 		},
 		"md5": func(args []TypedValue) (TypedValue, error) {
@@ -4508,43 +3453,16 @@ func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (Typed
 		"getServerStatus":       i.getServerStatus,
 		"listServers":           i.listServers,
 		"antiHomoPhobe":         i.antiHomoPhobe,
-		"getLGBTResources":      i.getLGBTResources,
-		"findSafeSpace":         i.findSafeSpace,
-		"getCrisisSupport":      i.getCrisisSupport,
-		"getLGBTQLaws":          i.getLGBTQLaws,
-		"getDailyAffirmation":   i.getDailyAffirmation,
-		"moodCheck":             i.moodCheck,
-		"guidedBreathing":       i.guidedBreathing,
-		"defineTerm":            i.defineTerm,
-		"lgbtHistoryQuiz":       i.lgbtHistoryQuiz,
-		"getDailyFact":          i.getDailyFact,
-		"getHRTInfo":            i.getHRTInfo,
-		"findLGBTDoctor":        i.findLGBTDoctor,
-		"getDocumentChangeGuide": i.getDocumentChangeGuide,
-		"getLGBTQEvents":        i.getLGBTQEvents,
-		"createLGBTQGroup":      i.createLGBTQGroup,
-		"findVolunteerOpportunity": i.findVolunteerOpportunity,
-		"getLGBTQBook":          i.getLGBTQBook,
-		"getLGBTQPlaylist":      i.getLGBTQPlaylist,
-		"getLGBTQMovies":        i.getLGBTQMovies,
-		"getPrideParadeInfo":    i.getPrideParadeInfo,
-		"getComingOutTips":      i.getComingOutTips,
-		"getTransHealthcare":    i.getTransHealthcare,
-		"findLGBTQShelter":      i.findLGBTQShelter,
-		"getIntersexResources":  i.getIntersexResources,
-		"getNonbinaryGuide":     i.getNonbinaryGuide,
-		"findLGBTQTherapist":    i.findLGBTQTherapist,
-		"getAsylumInfo":         i.getAsylumInfo,
-		"getAsexualResources":   i.getAsexualResources,
-		"getPolyamoryGuide":     i.getPolyamoryGuide,
-		"getGenderAffirmingCare": i.getGenderAffirmingCare,
-		"findLGBTQCommunity":    i.findLGBTQCommunity,
-		"getLGBTQHistory":       i.getLGBTQHistory,
-		"getLGBTQParenting":     i.getLGBTQParenting,
-		"getConversionTherapyHelp": i.getConversionTherapyHelp,
-		"getLGBTQHousing":       i.getLGBTQHousing,
-		"getQueerArt":           i.getQueerArt,
-		"getLGBTQFriendlyCities": i.getLGBTQFriendlyCities,
+		"setSDKey":              i.setSDKey,
+		"setSDModel":            i.setSDModel,
+		"generateLGBTImage":     i.generateLGBTImage,
+		"getLGBTImageHistory":   i.getLGBTImageHistory,
+		"deleteLGBTImage":       i.deleteLGBTImage,
+		"createFile":            i.createFile,
+		"runProgram":            i.runProgram,
+		"fileInfo":              i.fileInfo,
+		"copyFile":              i.copyFile,
+		"deleteFile":            i.deleteFile,
 	}
 
 	fn, ok := builtins[name]
@@ -4634,8 +3552,6 @@ func (i *Interpreter) isTruthy(val TypedValue) bool {
 		return val.Value.(string) != ""
 	case TypeArray:
 		return len(val.Value.([]TypedValue)) > 0
-	case TypeObject:
-		return true
 	default:
 		return false
 	}
@@ -4916,11 +3832,9 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		}
 		
 		if n.Postfix {
-			// Возвращаем старое значение, но сохраняем новое
 			i.setVar(n.Name, result)
 			return current, nil
 		} else {
-			// Возвращаем новое значение
 			i.setVar(n.Name, result)
 			return result, nil
 		}
@@ -5094,225 +4008,6 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		}
 		i.mu.Unlock()
 		return TypedValue{Type: TypeNull, Value: nil}, nil
-	case *QueerClassDeclaration:
-		i.mu.Lock()
-		i.queerClasses[n.Name] = n
-		i.mu.Unlock()
-		return TypedValue{Type: TypeNull, Value: nil}, nil
-	case *QueerInstanceNode:
-		classDecl, ok := i.queerClasses[n.ClassName]
-		if !ok {
-			return TypedValue{}, fmt.Errorf("class not defined: %s", n.ClassName)
-		}
-		
-		instance := &QueerInstance{
-			ClassName: n.ClassName,
-			Fields:    make(map[string]TypedValue),
-			Methods:   make(map[string]*FunctionDeclaration),
-			Parent:    nil,
-		}
-		
-		for fieldName, fieldType := range classDecl.Fields {
-			var defaultValue TypedValue
-			switch fieldType {
-			case "lesbian":
-				defaultValue = NewTypedString("")
-			case "gay":
-				defaultValue = NewTypedInt(0)
-			case "trans":
-				defaultValue = NewTypedFloat(0.0)
-			case "nonbinary":
-				defaultValue = NewTypedBool(false)
-			case "gender":
-				defaultValue = NewTypedArray([]TypedValue{})
-			default:
-				defaultValue = TypedValue{Type: TypeNull, Value: nil}
-			}
-			instance.Fields[fieldName] = defaultValue
-		}
-		
-		for methodName, method := range classDecl.Methods {
-			instance.Methods[methodName] = method
-		}
-		
-		if classDecl.Parent != "" {
-			parentClass, ok := i.queerClasses[classDecl.Parent]
-			if ok {
-				parentInstance := &QueerInstance{
-					ClassName: classDecl.Parent,
-					Fields:    make(map[string]TypedValue),
-					Methods:   make(map[string]*FunctionDeclaration),
-					Parent:    nil,
-				}
-				for fieldName, fieldType := range parentClass.Fields {
-					var defaultValue TypedValue
-					switch fieldType {
-					case "lesbian":
-						defaultValue = NewTypedString("")
-					case "gay":
-						defaultValue = NewTypedInt(0)
-					case "trans":
-						defaultValue = NewTypedFloat(0.0)
-					case "nonbinary":
-						defaultValue = NewTypedBool(false)
-					case "gender":
-						defaultValue = NewTypedArray([]TypedValue{})
-					default:
-						defaultValue = TypedValue{Type: TypeNull, Value: nil}
-					}
-					parentInstance.Fields[fieldName] = defaultValue
-				}
-				for methodName, method := range parentClass.Methods {
-					parentInstance.Methods[methodName] = method
-				}
-				instance.Parent = parentInstance
-			}
-		}
-		
-		if classDecl.Constructor != nil {
-			oldThis := i.this
-			i.this = instance
-			i.pushFrame()
-			
-			argValues := make([]TypedValue, len(n.Args))
-			for idx, arg := range n.Args {
-				val, err := i.Evaluate(arg)
-				if err != nil {
-					i.popFrame()
-					i.this = oldThis
-					return TypedValue{}, err
-				}
-				argValues[idx] = val
-			}
-			
-			for idx, param := range classDecl.Constructor.Params {
-				if idx < len(argValues) {
-					i.setVar(param, argValues[idx])
-				}
-			}
-			
-			for _, stmt := range classDecl.Constructor.Body {
-				_, err := i.Evaluate(stmt)
-				if err != nil {
-					i.popFrame()
-					i.this = oldThis
-					return TypedValue{}, err
-				}
-			}
-			
-			i.popFrame()
-			i.this = oldThis
-		}
-		
-		return NewTypedObject(instance), nil
-	case *QueerFieldAccessNode:
-		objVal, err := i.Evaluate(n.Object)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		
-		if objVal.Type != TypeObject {
-			return TypedValue{}, fmt.Errorf("cannot access field of non-object")
-		}
-		
-		obj := objVal.Value.(*QueerInstance)
-		
-		if val, ok := obj.Fields[n.Field]; ok {
-			return val, nil
-		}
-		
-		if obj.Parent != nil {
-			if val, ok := obj.Parent.Fields[n.Field]; ok {
-				return val, nil
-			}
-		}
-		
-		return TypedValue{}, fmt.Errorf("field not found: %s", n.Field)
-	case *QueerMethodCallNode:
-		objVal, err := i.Evaluate(n.Object)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		
-		if objVal.Type != TypeObject {
-			return TypedValue{}, fmt.Errorf("cannot call method on non-object")
-		}
-		
-		obj := objVal.Value.(*QueerInstance)
-		
-		var method *FunctionDeclaration
-		var found bool
-		
-		if m, ok := obj.Methods[n.Method]; ok {
-			method = m
-			found = true
-		} else if obj.Parent != nil {
-			if m, ok := obj.Parent.Methods[n.Method]; ok {
-				method = m
-				found = true
-			}
-		}
-		
-		if !found {
-			return TypedValue{}, fmt.Errorf("method not found: %s", n.Method)
-		}
-		
-		argValues := make([]TypedValue, len(n.Args))
-		for idx, arg := range n.Args {
-			val, err := i.Evaluate(arg)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			argValues[idx] = val
-		}
-		
-		oldThis := i.this
-		i.this = obj
-		i.pushFrame()
-		
-		for idx, param := range method.Params {
-			if idx < len(argValues) {
-				i.setVar(param, argValues[idx])
-			}
-		}
-		
-		i.returnFlag = false
-		i.returnValue = TypedValue{Type: TypeNull, Value: nil}
-		
-		var lastResult TypedValue
-		for _, stmt := range method.Body {
-			lastResult, err = i.Evaluate(stmt)
-			if err != nil {
-				i.popFrame()
-				i.this = oldThis
-				return TypedValue{}, err
-			}
-			if i.returnFlag {
-				break
-			}
-		}
-		
-		result := i.returnValue
-		if result.Type == TypeNull {
-			result = lastResult
-		}
-		
-		i.popFrame()
-		i.this = oldThis
-		return result, nil
-	case *ThisNode:
-		if i.this == nil {
-			return TypedValue{}, fmt.Errorf("'this' used outside of method")
-		}
-		return NewTypedObject(i.this), nil
-	case *SuperNode:
-		if i.this == nil {
-			return TypedValue{}, fmt.Errorf("'super' used outside of method")
-		}
-		if i.this.Parent == nil {
-			return TypedValue{}, fmt.Errorf("'super' used in class without parent")
-		}
-		return NewTypedObject(i.this.Parent), nil
 	case *FunctionCall:
 		if fn, ok := i.getBuiltinFunction(n.Name); ok {
 			args := make([]TypedValue, len(n.Args))
@@ -5696,7 +4391,7 @@ func (i *Interpreter) runOrientationDemo() {
 
 func isExpressionNode(node Node) bool {
 	switch node.(type) {
-	case *NumberNode, *FloatNode, *StringNode, *BooleanNode, *VariableNode, *BinaryOpNode, *FunctionCall, *ArrayNode, *ArrayIndexNode, *UnaryNode, *QueerInstanceNode, *QueerFieldAccessNode, *QueerMethodCallNode, *ThisNode, *SuperNode:
+	case *NumberNode, *FloatNode, *StringNode, *BooleanNode, *VariableNode, *BinaryOpNode, *FunctionCall, *ArrayNode, *ArrayIndexNode, *UnaryNode:
 		return true
 	default:
 		return false
@@ -5781,20 +4476,11 @@ func printAST(node Node, indent int) {
 		fmt.Fprintf(output, "%sCall: %s\n", prefix, n.Name)
 	case *ReturnStatement:
 		fmt.Fprintln(output, prefix+"Return")
-	case *QueerClassDeclaration:
-		fmt.Fprintf(output, "%sQueerClass: %s\n", prefix, n.Name)
-	case *QueerInstanceNode:
-		fmt.Fprintf(output, "%sNew %s\n", prefix, n.ClassName)
-	case *ThisNode:
-		fmt.Fprintln(output, prefix+"this")
-	case *SuperNode:
-		fmt.Fprintln(output, prefix+"super")
 	default:
 		fmt.Fprintf(output, "%sUnknown: %T\n", prefix, n)
 	}
 }
 
-// ---------- runExample ----------
 func runExample() {
 	program := `
 @ Пример с инкрементом и декрементом
@@ -5872,17 +4558,12 @@ main();
 	}
 }
 
-// ------------------------------------------------------------
-// НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: Компиляция в .exe без установки Go
-// ------------------------------------------------------------
-
 const (
 	scriptMarker = "##RB_SCRIPT_START##"
 	markerSize   = len(scriptMarker)
 	readBufSize  = 4096
 )
 
-// isEmbeddedScript проверяет, содержит ли текущий исполняемый файл встроенный скрипт
 func isEmbeddedScript() bool {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -5902,7 +4583,6 @@ func isEmbeddedScript() bool {
 		return false
 	}
 
-	// Ищем маркер с конца файла (с запасом 1 МБ)
 	searchSize := int64(1024 * 1024)
 	if searchSize > info.Size() {
 		searchSize = info.Size()
@@ -5932,7 +4612,6 @@ func isEmbeddedScript() bool {
 	return false
 }
 
-// getEmbeddedScript извлекает встроенный скрипт из исполняемого файла
 func getEmbeddedScript() (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -5948,7 +4627,6 @@ func getEmbeddedScript() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Ищем маркер с конца
 	markerPos := int64(-1)
 	searchSize := int64(1024 * 1024)
 	if searchSize > info.Size() {
@@ -5982,7 +4660,6 @@ func getEmbeddedScript() (string, error) {
 		return "", fmt.Errorf("script marker not found")
 	}
 
-	// Читаем оставшуюся часть после маркера
 	_, err = file.Seek(markerPos, io.SeekStart)
 	if err != nil {
 		return "", err
@@ -5994,9 +4671,7 @@ func getEmbeddedScript() (string, error) {
 	return string(data), nil
 }
 
-// createExecutable создаёт новый .exe, встраивая в него скрипт
 func createExecutable(inputScript, outputExe string) error {
-	// Проверяем входной файл
 	scriptData, err := os.ReadFile(inputScript)
 	if err != nil {
 		return fmt.Errorf("cannot read script file '%s': %v", inputScript, err)
@@ -6005,33 +4680,28 @@ func createExecutable(inputScript, outputExe string) error {
 		return fmt.Errorf("script file '%s' is empty", inputScript)
 	}
 
-	// Получаем путь к текущему исполняемому файлу (rb.exe)
 	selfExe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot get executable path: %v", err)
 	}
 
-	// Открываем текущий бинарник для чтения
 	src, err := os.Open(selfExe)
 	if err != nil {
 		return fmt.Errorf("cannot open self executable: %v", err)
 	}
 	defer src.Close()
 
-	// Создаём выходной файл
 	dst, err := os.Create(outputExe)
 	if err != nil {
 		return fmt.Errorf("cannot create output file: %v", err)
 	}
 	defer dst.Close()
 
-	// Копируем содержимое бинарника
 	_, err = io.Copy(dst, src)
 	if err != nil {
 		return fmt.Errorf("copy failed: %v", err)
 	}
 
-	// Дописываем маркер и скрипт
 	_, err = dst.Write([]byte(scriptMarker))
 	if err != nil {
 		return fmt.Errorf("write marker failed: %v", err)
@@ -6041,8 +4711,6 @@ func createExecutable(inputScript, outputExe string) error {
 		return fmt.Errorf("write script failed: %v", err)
 	}
 
-	// Устанавливаем права на выполнение (для Unix не нужно, для Windows неважно)
-	// Закрываем файл и делаем его исполняемым (на Windows это просто .exe)
 	err = dst.Sync()
 	if err != nil {
 		return fmt.Errorf("sync failed: %v", err)
@@ -6059,14 +4727,13 @@ func infoSize(f *os.File) int64 {
 		return 0
 	}
 	return info.Size()
-}// ---------- runScript выполняет скрипт из строки ----------
+}
+
 func runScript(script string, showTokens, showAST bool) error {
     lexer := NewLexer(script)
     
-    // Создаем интерпретатор ОДИН РАЗ
     interpreter := NewInterpreter()
     
-    // Проверка на оскорбительные термины
     hasOffensive, terms := interpreter.checkForOffensiveTerms(script)
     if hasOffensive {
         fmt.Printf("⚠️ В коде обнаружены потенциально оскорбительные термины: %v\n", terms)
@@ -6105,18 +4772,16 @@ func runScript(script string, showTokens, showAST bool) error {
     }
     return nil
 }
-// ---------- Главная функция ----------
+
 func main() {
 	setupConsole()
 
-	// Проверяем, не встроен ли в нас скрипт
 	if isEmbeddedScript() {
 		script, err := getEmbeddedScript()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Ошибка извлечения встроенного скрипта: %v\n", err)
 			os.Exit(1)
 		}
-		// Выполняем скрипт (без дополнительных флагов)
 		err = runScript(script, false, false)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -6125,7 +4790,6 @@ func main() {
 		return
 	}
 
-	// Обычный режим работы
 	file, err := os.Create("lgbt.qiap")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Не удалось создать файл lgbt.qiap: %v\n", err)
@@ -6152,7 +4816,6 @@ func main() {
 		return
 	}
 
-	// Обработка флага -b (компиляция)
 	if *buildFlag {
 		args := flag.Args()
 		if len(args) != 2 {

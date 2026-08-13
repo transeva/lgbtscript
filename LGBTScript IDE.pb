@@ -49,7 +49,7 @@ CompilerEndIf
 #STYLE_CONSTANT   = 10
 #STYLE_BUILTIN    = 11
 #STYLE_KEYWORD_GAY = 12      ; Добавлено для gay
-#STYLE_KEYWORD_LESBIAN = 13   ; Добавлено для lesbian, cis, nocis, trans
+#STYLE_KEYWORD_LESBIAN = 13   ; Добавлено для lesbian, cis, nocis, queer
 #STYLE_KEYWORD_GENDER = 14    ; Добавлено для gender
 #STYLE_KEYWORD_PRIDE=15
 ;--- Индикаторы / маркеры ----------------------------------------------------
@@ -344,9 +344,9 @@ Procedure InitKeywords()
   Keywords("gay")        = #STYLE_KEYWORD
   Keywords("homo")        = #STYLE_KEYWORD
     Keywords("pride")        = #STYLE_KEYWORD
-   Keywords("queer")        = #STYLE_KEYWORD
+
   Keywords("lesbian")    = #STYLE_KEYWORD
-  Keywords("trans")      = #STYLE_KEYWORD
+  Keywords("queer")      = #STYLE_KEYWORD
   Keywords("nocis")      = #STYLE_KEYWORD
   Keywords("pride")      = #STYLE_KEYWORD
   Keywords("rainbow")    = #STYLE_KEYWORD
@@ -510,7 +510,7 @@ Procedure.i WordStyle(w$, nextIsParen)
   Select lw$
     Case "gay"
       ProcedureReturn #STYLE_KEYWORD_GAY
-    Case "lesbian", "cis", "nocis", "trans", "sex"
+    Case "lesbian", "cis", "nocis", "sex", "quuer"
       ProcedureReturn #STYLE_KEYWORD_LESBIAN
     Case "gender", "asexual"
       ProcedureReturn #STYLE_KEYWORD_GENDER
@@ -1082,6 +1082,7 @@ Procedure LayoutUI()
     Select TB()\cmd
       Case #CMD_OPEN  : TB()\w = 80
       Case #CMD_SAVE  : TB()\w = 90
+      
       Case #CMD_RUN   : TB()\w = 100
       Case #CMD_COMPILE : TB()\w = 110  ; Ширина для кнопки компиляции
       Case #CMD_CLEAR : TB()\w = 90
@@ -1653,7 +1654,11 @@ Procedure DoCommand(cmd)
       File$ = OpenFileRequester("Открыть файл", "",
               "Rainbow files (*.rainbow)|*.rainbow|All files (*.*)|*.*", 0)
       If File$ : LoadFileToEditor(File$) : EndIf
-
+      
+      Case    122121
+        SaveFileRequester("Сохранить файл", "main.rainbow",
+                "Rainbow files (*.rainbow)|*.rainbow|All files (*.*)|*.*", 0)
+        
     Case #CMD_SAVE
       If CurrentFile$ = ""
         File$ = SaveFileRequester("Сохранить файл", "main.rainbow",
@@ -1674,6 +1679,7 @@ Procedure DoCommand(cmd)
       EndIf
 
     Case #CMD_SAVEAS
+
       File$ = SaveFileRequester("Сохранить как", "main.rainbow",
               "Rainbow files (*.rainbow)|*.rainbow|All files (*.*)|*.*", 0)
       If File$
@@ -1695,7 +1701,8 @@ Procedure DoCommand(cmd)
     Case #CMD_REDO  : ScintillaSendMessage(#GAD_EDITOR, #SCI_REDO,  0, 0)
     Case #CMD_RUN   : RunRainbow()
     Case #CMD_COMPILE : CompileToExe()  ; Обработка команды компиляции
-
+    Case 122121
+      
     Case #CMD_CLEAR
       ClearGadgetItems(#GAD_LOG)
       ClearMap(LogLineTarget())
@@ -1737,6 +1744,7 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
       MenuItem(#CMD_OPEN,   "Открыть..." + Chr(9) + "Ctrl+O")
       MenuItem(#CMD_SAVE,   "Сохранить" + Chr(9) + "Ctrl+S")
       MenuItem(#CMD_SAVEAS, "Сохранить как...")
+         MenuItem(122121, "Сгенерировать ЛГБТ-картинку")
       MenuBar()
       MenuItem(#CMD_EXIT,   "Выход")
     MenuTitle("Правка")
@@ -1889,8 +1897,8 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   If *TextBuf : FreeMemory(*TextBuf) : EndIf
 EndIf
 ; IDE Options = PureBasic 6.21 (Windows - x64)
-; CursorPosition = 1754
-; FirstLine = 1747
+; CursorPosition = 1099
+; FirstLine = 1096
 ; Folding = --------------
 ; EnableXP
 ; DPIAware

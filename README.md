@@ -1,451 +1,297 @@
-# 🏳️‍🌈 LGBTScript
+markdown
+# 🏳️‍🌈 LGBTScript & LGBTScript IDE
 
-<div align="center">
+**An Inclusive, Expressive, and Safe Programming Language for the LGBTQ+ Community**
 
-![LGBTScript Logo](https://img.shields.io/badge/LGBTScript-9.0-ff6b6b?style=for-the-badge&logo=rainbow)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)
-[![Made with Love](https://img.shields.io/badge/Made%20with-Love-ff69b4.svg?style=flat-square)](https://github.com/lgbt-script/lgbtscript)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
+![Version](https://img.shields.io/badge/version-7.0-ff69b4.svg)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
+![Made with Love](https://img.shields.io/badge/Made%20with-Love-ff69b4.svg)
 
-**An Inclusive, Colorful Programming Language for Everyone**
+LGBTScript is a programming language designed to be a validating, empowering, and safe environment for the LGBTQ+ community. It is not just a tool; it's a statement that everyone deserves to code with pride, respect, and safety.
 
-[Features](#-features) • [Installation](#-installation) • [Examples](#-examples) • [Documentation](#-documentation) • [IDE](#-ide)
-
-</div>
-
----
-
-## 🌈 Introduction
-
-**LGBTScript** is a programming language designed with inclusivity, diversity, and accessibility at its core. Inspired by the LGBTQ+ community, it features a colorful syntax, comprehensive standard library, and a powerful IDE that makes programming accessible to everyone.
-
-> **"Technology should be for everyone. LGBTScript breaks down barriers by using inclusive terminology, providing clear error messages, and celebrating diversity through its design."**
+[Report Bug](https://github.com/your-repo/issues) · [Request Feature](https://github.com/your-repo/issues) · [View Documentation](https://your-docs-url.com)
 
 ---
 
-## ✨ Features
+## 🌈 Philosophy
 
-### 🏳️‍🌈 Inclusive Syntax
-- **Keywords:** `lesbian`, `gay`, `queer`, `nonbinary`, `gender`, `asexual`
-- **Control Flow:** `cis` (if), `nocis` (else), `pride` (while), `sex` (for)
-- **Functions:** `rainbow` declarations with `return` statements
-- **Error Handling:** `try`/`catch` blocks with error variable
+LGBTScript was built with a clear purpose:
 
-### 🚀 Powerful Features
-- **Strong Typing:** Variables must be declared with a type
-- **Advanced Operators:** `++`, `--`, `+=`, `-=`, `*=`, `/=`
-- **Arrays:** Dynamic arrays with indexing and manipulation
-- **Constants:** Immutable values with `asexual`
-- **Functions:** Parameter passing, return values, recursion
-- **Exports:** `export` keyword for function visibility
+- **Validate Identity:** Syntax and keywords reflect LGBTQ+ identities and themes.
+- **Promote Safety:** A built-in Hate Filter neutralizes hate speech in real-time across 20+ languages.
+- **Empower Communication:** Create safe, filtered WebSocket chat servers for community building.
+- **Be Accessible:** Human-readable code and an inclusive IDE make programming approachable for everyone.
+- **Remain Open & Free:** Licensed under **Apache 2.0**, ensuring it is available for all.
 
-### 🌐 Web Server
-- Built-in HTTP server with routing support
-- `createServer`, `startServer`, `stopServer`
-- `addRoute` for GET, POST, PUT, DELETE
-- Server status and management functions
+## ✨ Core Features
 
-### 🎨 AI Image Generation
-- Stable Diffusion integration
-- Generate LGBTQ+ themed images
-- Custom prompt generation with random selection
-- Local fallback with ASCII art generation
-
-### 🔒 Security
-- Sandboxing for safe code execution
-- File path validation
-- URL blocking
-- Maximum file size limits
-- Dangerous command blocking
-
-### 📁 File Operations
-- Read, write, copy, delete files
-- File info and existence checking
-- Directory listing
-- Append mode support
-
-### 🔧 Standard Library
-- **String:** split, replace, trim, upper, lower, length
-- **Array:** append, remove, length
-- **Math:** random, max, min, sqrt, pow
-- **Time:** getTime, getYear, getMonth, sleep
-- **System:** getOS, getHostname, getArgs, hasFlag
-- **HTTP:** httpGet, httpPost
-- **JSON:** jsonParse
-- **Crypto:** md5, sha256
-- **Regex:** regexFind, regexReplace
+- **Inclusive Data Types:** `lesbian`, `gay`, `queer`, `nonbinary`, `gender`
+- **Safe by Design:** Real-time Hate Filter with logging and masking.
+- **WebSocket Chat:** Create secure, filtered chat servers with a web UI.
+- **Native GUI:** Build Windows desktop applications with ease.
+- **HTTP Server:** Create and manage RESTful web servers.
+- **Object-Oriented Programming:** Full support for classes, inheritance, and more.
+- **Social Functions:** Access resources, support, and affirmations.
+- **Compilable:** Create standalone `.exe` files for your scripts.
 
 ---
 
-## 💻 Installation
+## 🚀 Getting Started
 
-### Pre-built Binary (Recommended)
+### Prerequisites
+
+- **Go 1.19+**: Required to build from source.
+- **Windows OS**: Full support for GUI and most native functions. Other OSes are supported for core scripting.
+
+### Installation
+
+#### Option 1: Download a Release
+
+Download the latest release from the [Releases Page](https://github.com/your-repo/releases).
+
+#### Option 2: Build from Source
+
 ```bash
-# Download the latest release from GitHub
-# Place rb.exe in your project directory
-# Run your .rainbow files
-Building from Source
-bash
-# Clone the repository
-git clone https://github.com/lgbt-script/lgbtscript
+git clone https://github.com/your-repo/lgbtscript.git
 cd lgbtscript
+go build -o lgbt.exe main.go
+Your First Program
+Create a file called hello.rainbow:
 
-# Build the interpreter
-go build -o rb.exe
-
-# Run with your script
-./rb.exe -lgbt myfile.rainbow
-Using the IDE
-The LGBTScript IDE is included as a standalone executable. It provides a professional development environment with syntax highlighting, debugging, and compilation features.
-
-📖 Quick Start
-Hello World
-rainbow
+go
 rainbow main() {
-    comingout "Hello, LGBTQ+ World! 🏳️‍🌈";
+    comingout "Hello, LGBTScript! 🏳️‍🌈";
 }
-
 main();
-Variables
-rainbow
-@ Variable declarations
-gay age = 25;                  @ Integer
-lesbian name = "Alex";         @ String
-queer height = 175.5;          @ Float
-nonbinary isActive = true;     @ Boolean
-gender colors = [1, 2, 3];     @ Array
+Run it:
 
-@ Constants
-asexual PI = 3.14159;
+bash
+./lgbt.exe hello.rainbow
+📚 Language Basics
+Data Types & Declarations
+Keyword	Type	Description	Example
+lesbian	String	Text values	lesbian name = "Alex";
+gay	Integer	Whole numbers	gay age = 25;
+queer	Float	Decimal numbers	queer score = 98.6;
+nonbinary	Boolean	True/False	nonbinary isMember = true;
+gender	Array	List of values	gender list = [1, 2, 3];
+asexual	Constant	Immutable value	asexual PI = 3.14159;
 Control Flow
-rainbow
-@ If-Else (cis/nocis)
-cis (age >= 18) {
+go
+// Conditional (cis)
+cis age >= 18 {
     comingout "Adult";
-} nocis (age >= 13) {
+} nocis age >= 13 {
     comingout "Teen";
-} nocis {
+} cis {
     comingout "Child";
 }
 
-@ While loop (pride)
+// While Loop (pride)
 gay i = 0;
-pride (i < 5) {
-    comingout "i = " + i;
-    i++;
+pride i < 5 {
+    comingout i;
+    i = i + 1;
 }
 
-@ For loop (sex)
-sex (gay i = 0; i < 5; i++) {
-    comingout "i = " + i;
+// For Loop (sex)
+sex (gay i = 0; i < 5; i = i + 1) {
+    comingout i;
 }
 Functions
-rainbow
-@ Function declaration
-rainbow add(gay a, gay b) {
+go
+rainbow greet(lesbian name) {
+    comingout "Hello, " + name + "!";
+}
+
+export rainbow add(gay a, gay b) {
     return a + b;
 }
+Queer Classes (OOP)
+go
+queer Person {
+    lesbian name;
+    gay age;
 
-@ Exported function
-export rainbow multiply(gay a, gay b) {
-    return a * b;
-}
-
-@ Function call
-gay result = add(5, 3);
-comingout result;
-🖥️ LGBTScript IDE
-The LGBTScript IDE is a professional development environment with:
-
-🎨 Modern UI
-VS Code Dark+ theme with LGBTQ+ accent colors
-
-Rainbow gradient toolbar
-
-Color-coded syntax highlighting
-
-Line numbers with error markers
-
-Split view (editor + log)
-
-⌨️ Keyboard Shortcuts
-Shortcut	Action
-F5	Run script
-Ctrl+O	Open file
-Ctrl+S	Save file
-Ctrl+N	New file
-Ctrl+X	Cut
-Ctrl+C	Copy
-Ctrl+V	Paste
-Ctrl+Z	Undo
-Ctrl+Y	Redo
-Esc	Stop execution
-🔧 Features
-Syntax Highlighting: Full support for all LGBTScript keywords and types
-
-Word Highlighting: Automatic highlighting of variable occurrences
-
-Error Detection: Click on error lines to jump to source
-
-Log Viewer: Clear output with error and warning filtering
-
-Integrated Compiler: Compile .rainbow files to .exe
-
-Asynchronous Parsing: Fast highlighting for large files
-
-📚 Examples
-Web Server
-rainbow
-rainbow handleHome(args) {
-    return "<h1>Welcome to LGBTScript Web Server!</h1>";
-}
-
-rainbow main() {
-    comingout createServer("myServer", 8080);
-    addRoute("myServer", "GET", "/", handleHome);
-    startServer("myServer");
-    
-    comingout "Server running on http://localhost:8080";
-}
-
-main();
-File Processor
-rainbow
-rainbow processFile(lesbian filename) {
-    try {
-        cis (fileExists(filename)) {
-            lesbian content = readFile(filename);
-            lesbian upper = toUpper(content);
-            lesbian processed = replace(upper, "OLD", "NEW");
-            writeFile("processed_" + filename, processed);
-            comingout "File processed successfully!";
-        } nocis {
-            comingout "File not found!";
-        }
-    } catch {
-        comingout "Error: " + error;
+    rainbow constructor(lesbian n, gay a) {
+        this.name = n;
+        this.age = a;
     }
 }
 
-processFile("input.txt");
-Image Generation
-rainbow
+queer Employee extends Person {
+    lesbian role;
+    // ...
+}
+🛡️ Hate Filter
+The Hate Filter is always active in the interpreter, chat servers, and GUI.
+
+go
+lesbian text = "This is a slur: faggot";
+lesbian result = checkHate(text);
+comingout result; // JSON with 'has_hate': true
+Functions:
+
+checkHate(text): Checks for hate speech.
+
+filterHate(text): Returns filtered text.
+
+enableHateFilter() / disableHateFilter(): Toggle the filter.
+
+addHateSlur(lang, slur), removeHateSlur(lang, slur): Customize the filter.
+
+getHateLog(), clearHateLog(), getHateStats(): Manage logs.
+
+💬 WebSocket Chat
+Create safe, real-time chat servers with built-in filtering.
+
+go
+createLGBTChat("mainChat", 8080, 100);
+startLGBTChat("mainChat", 8080);
+sendLGBTChatMessage("mainChat", "Bot", "Hello, world!");
+Functions:
+
+createLGBTChat(name, port, maxMessages)
+
+startLGBTChat(name, port)
+
+stopLGBTChat(name)
+
+sendLGBTChatMessage(chatName, username, msg)
+
+getLGBTChatMessages(chatName, limit)
+
+getLGBTChatStats(chatName)
+
+listLGBTChats()
+
+🖥️ GUI Functions (Windows)
+go
+rainbowWin("main", "My App", 400, 300);
+rainbowButton("main", "btn", "Click Me", 50, 50, 100, 30);
+
+rainbow handleClick() {
+    msg("Info", "Button clicked!", "ok", "info");
+}
+
+rainbowOnClick("main", "btn", "handleClick");
+🌐 HTTP Server
+go
+createServer("myAPI", 8080);
+addRoute("myAPI", "GET", "/hello", rainbow () {
+    return "Hello, World!";
+});
+startServer("myAPI");
+📦 Compiling to .exe
+bash
+# Standard executable
+./lgbt.exe -b script.rainbow app.exe
+
+# GUI executable (no console window)
+./lgbt.exe -exe script.rainbow app_gui.exe
+🖋️ LGBTScript IDE
+The LGBTScript IDE is an integrated development environment designed for LGBTScript.
+
+Features:
+
+🌈 Themed UI: A welcoming, pride-themed interface.
+
+📝 Code Editor: Syntax highlighting, auto-indentation, error detection.
+
+▶️ Integrated Runner: Execute scripts and see output in real-time.
+
+🛡️ Hate Filter Integration: Safe output pane.
+
+📊 Project Management: Create, save, and manage .rainbow scripts.
+
+📚 Built-in Documentation: Quick access to language docs and examples.
+
+🔧 Compiler Support: Compile scripts to .exe with one click.
+
+🌐 Built-in Chat Client: Test WebSocket chat servers.
+
+📘 Examples
+Hello World
+go
 rainbow main() {
-    setSDKey("sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-    
-    comingout "Generating LGBTQ+ pride image...";
-    generateLGBTImage("pride_art.png");
-    
-    getLGBTImageHistory();
+    comingout "Hello, LGBTScript! 🏳️‍🌈";
 }
-
 main();
-Calculator
-rainbow
-rainbow calculate(gay a, gay b, lesbian op) {
-    cis (op == "+") {
-        return a + b;
-    } nocis (op == "-") {
-        return a - b;
-    } nocis (op == "*") {
-        return a * b;
-    } nocis (op == "/") {
-        cis (b != 0) {
-            return a / b;
-        } nocis {
-            comingout "Error: Division by zero!";
-            return 0;
-        }
-    } nocis {
-        comingout "Error: Unknown operation!";
-        return 0;
-    }
-}
-
-gay result = calculate(10, 5, "+");
-comingout "10 + 5 = " + result;
-🛠️ Built-in Functions
-File Operations
-rainbow
-readFile(filename)          @ Read file content as string
-writeFile(filename, content) @ Write string to file
-fileExists(filename)        @ Check if file exists
-getDirFiles(directory)      @ List files in directory
-createFile(filename, content, mode) @ Create file (write/append)
-fileInfo(filename)          @ Get file metadata
-copyFile(src, dst)         @ Copy file
-deleteFile(filename)        @ Delete file
-String Operations
-rainbow
-split(text, delimiter)      @ Split string into array
-replace(text, old, new)     @ Replace substrings
-trim(text)                  @ Remove whitespace
-length(value)              @ Get string or array length
-toUpper(text)              @ Convert to uppercase
-toLower(text)              @ Convert to lowercase
-Array Operations
-rainbow
-append(array, value)        @ Add element to array
-remove(array, index)        @ Remove element at index
-Math Functions
-rainbow
-random(min, max)           @ Generate random integer
-max(values...)             @ Get maximum value
-min(values...)             @ Get minimum value
-sqrt(number)               @ Calculate square root
-pow(base, exponent)        @ Calculate power
-Time Functions
-rainbow
-getTime()                  @ Get current date/time string
-getYear()                  @ Get current year
-getMonth()                 @ Get current month
-sleep(ms)                  @ Sleep for milliseconds
-System Functions
-rainbow
-getOS()                    @ Get operating system
-getHostname()              @ Get system hostname
-getArgs()                  @ Get command-line arguments
-hasFlag(flag)              @ Check if command-line flag exists
-runProgram(command, args, workDir, timeout) @ Execute external program
-HTTP Functions
-rainbow
-httpGet(url)               @ HTTP GET request
-httpPost(url, data)        @ HTTP POST request
-JSON & Crypto
-rainbow
-jsonParse(jsonString)      @ Parse JSON string
-md5(text)                  @ MD5 hash
-sha256(text)               @ SHA-256 hash
-Regex Functions
-rainbow
-regexFind(pattern, text)   @ Find all matches
-regexReplace(pattern, text, replacement) @ Replace matches
-🏳️‍🌈 Anti-Homophobia Feature
-LGBTScript includes a unique anti-homophobia demonstration:
-
-rainbow
+Chat Server
+go
 rainbow main() {
-    comingout "⚠️ Anti-Homophobia Mode Activated!";
-    antiHomoPhobe(10);  @ 10 seconds of demonstration
+    createLGBTChat("community", 8080, 100);
+    startLGBTChat("community", 8080);
+    sendLGBTChatMessage("community", "System", "Chat is live!");
+    comingout "Server running at http://localhost:8080";
+}
+main();
+Social Functions
+go
+rainbow main() {
+    lesbian resources = getLGBTResources("USA", "crisis", "New York");
+    comingout resources;
+}
+main();
+OOP Example
+go
+queer Animal {
+    lesbian name;
+    rainbow constructor(lesbian n) { this.name = n; }
+    rainbow speak() { comingout "Animal sound"; }
 }
 
-main();
-This feature demonstrates support for the LGBTQ+ community through visual and interactive feedback.
+queer Dog extends Animal {
+    rainbow speak() { comingout "Woof!"; }
+}
 
-📜 License
-LGBTScript is released under the Apache License, Version 2.0:
+lesbian d = new Dog("Buddy");
+d.speak();
+🤝 Contributing
+We welcome contributions of all kinds! Whether it's reporting a bug, suggesting a feature, or submitting a pull request, your help is appreciated.
+
+Fork the repository.
+
+Create your feature branch (git checkout -b feature/AmazingFeature).
+
+Commit your changes (git commit -m 'Add some AmazingFeature').
+
+Push to the branch (git push origin feature/AmazingFeature).
+
+Open a Pull Request.
+
+📄 License
+LGBTScript and the LGBTScript IDE are released under the Apache License, Version 2.0. See the LICENSE file for details.
+
+You are free to:
+
+Use the software for any purpose, commercial or non-commercial.
+
+Modify the software to suit your needs.
+
+Distribute the software or your modifications.
+
+You must:
+
+Retain the copyright and license notices.
+
+Include a copy of the license.
+
+Clearly state any changes you have made.
+
+A full copy of the license is available at https://www.apache.org/licenses/LICENSE-2.0.
+
+🙌 Acknowledgments
+The LGBTQ+ community for the inspiration and support.
+
+The open-source community for the tools that made this possible.
+
+Everyone who believes that technology should be inclusive and safe for all.
+
+Built with Pride, for the Community.
+
+https://img.shields.io/github/stars/your-repo/lgbtscript.svg?style=social
 
 text
-Copyright 2026 LGBTScript Contributors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at:
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-🤝 Contributing
-We welcome contributions! Here's how you can help:
-
-Fork the repository
-
-Create a feature branch
-
-Make your changes
-
-Submit a pull request
-
-Please ensure your code follows the existing style and includes appropriate tests.
-
-Areas for Contribution
-Language features and syntax
-
-Standard library enhancements
-
-IDE improvements
-
-Documentation
-
-Bug fixes
-
-Test coverage
-
-Performance optimizations
-
-🌟 Support
-Documentation: Full HTML Documentation
-
-Issues: GitHub Issues
-
-Community: Join our Discord server
-
-Email: lgbt-script@example.com
-
-🙏 Acknowledgments
-Special thanks to:
-
-The LGBTQ+ community for inspiration
-
-Open source contributors
-
-Stability AI for image generation API
-
-All users and supporters
-
-<div align="center">
-Made with ❤️ for the LGBTQ+ community and allies
-
-⬆ Back to Top
-
-</div> ```
-🏳️‍🌈 Summary
-Both documents provide comprehensive documentation for LGBTScript:
-
-HTML Documentation
-Complete language reference
-
-Interactive design with rainbow themes
-
-Detailed feature descriptions
-
-Code examples with syntax highlighting
-
-License information
-
-Mobile-responsive design
-
-GitHub README
-Quick start guide
-
-Feature list with emoji icons
-
-Installation instructions
-
-Extensive code examples
-
-Keyboard shortcuts table
-
-Full function reference
-
-Contributing guidelines
-
-Both documents are optimized for readability with:
-
-Rainbow color themes
-
-Clear section headers
-
-Code blocks with syntax highlighting
-
-Emoji icons for visual appeal
-
-Table of contents for navigation
-
-Professional design consistent with the LGBTQ+ theme
-
-The license is clearly stated as Apache 2.0, and both documents emphasize the inclusive, community-focused nature of the project.
+This response is AI-generated, for reference only.

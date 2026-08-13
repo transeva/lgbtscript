@@ -48,10 +48,11 @@ CompilerEndIf
 #STYLE_TYPE       = 9
 #STYLE_CONSTANT   = 10
 #STYLE_BUILTIN    = 11
-#STYLE_KEYWORD_GAY = 12      ; Добавлено для gay
-#STYLE_KEYWORD_LESBIAN = 13   ; Добавлено для lesbian, cis, nocis, queer
-#STYLE_KEYWORD_GENDER = 14    ; Добавлено для gender
-#STYLE_KEYWORD_PRIDE=15
+#STYLE_KEYWORD_GAY = 12
+#STYLE_KEYWORD_LESBIAN = 13
+#STYLE_KEYWORD_GENDER = 14
+#STYLE_KEYWORD_PRIDE = 15
+
 ;--- Индикаторы / маркеры ----------------------------------------------------
 #IND_WORD     = 8
 #IND_ERROR    = 9
@@ -83,12 +84,13 @@ CompilerEndIf
 #CMD_REDO    = 13
 #CMD_RUN     = 20
 #CMD_CLEAR   = 21
-#CMD_COMPILE = 22       ; Новая команда для компиляции
+#CMD_COMPILE = 22
+#CMD_GENERATE_IMAGE = 30
 
 ;--- Геометрия ---------------------------------------------------------------
 #TOOLBAR_H    = 48
 #STATUS_H     = 28
-#STRIPE_H     = 3               ; Тонкая полоса
+#STRIPE_H     = 3
 #EDITOR_RATIO = 70
 
 ;--- Совместимость констант Scintilla ----------------------------------------
@@ -261,7 +263,7 @@ Declare   GotoEditorLine(lineNo)
 Declare   MarkErrorLine(lineNo)
 Declare   ClearErrorMarks()
 Declare   RunRainbow()
-Declare   CompileToExe()      ; Новая функция для компиляции
+Declare   CompileToExe()
 Declare.i SaveEditorTo(File$)
 Declare   LoadFileToEditor(File$)
 Declare   LayoutUI()
@@ -270,6 +272,9 @@ Declare   UpdateCaretStatus()
 Declare   DrawToolbar()
 Declare   DrawStatusBar()
 Declare   DoCommand(cmd)
+Declare.i GenerateLGBTImageWithAPI(apiKey$, filename$ = "lgbt.png")
+Declare   ShowGeneratedImage(filename$)
+Declare   GenerateImageDialog()
 
 ;===============================================================================
 ; РАДУЖНАЯ ГРАФИКА
@@ -342,13 +347,11 @@ CompilerEndIf
 Procedure InitKeywords()
   ClearMap(Keywords())
   Keywords("gay")        = #STYLE_KEYWORD
-  Keywords("homo")        = #STYLE_KEYWORD
-    Keywords("pride")        = #STYLE_KEYWORD
-
+  Keywords("homo")       = #STYLE_KEYWORD
+  Keywords("pride")      = #STYLE_KEYWORD
   Keywords("lesbian")    = #STYLE_KEYWORD
   Keywords("queer")      = #STYLE_KEYWORD
   Keywords("nocis")      = #STYLE_KEYWORD
-  Keywords("pride")      = #STYLE_KEYWORD
   Keywords("rainbow")    = #STYLE_KEYWORD
   Keywords("cis")        = #STYLE_KEYWORD
   Keywords("comingout")  = #STYLE_KEYWORD
@@ -501,25 +504,22 @@ Procedure CollectDeclarations()
 EndProcedure
 
 ;===============================================================================
-; Стиль слова (МОДИФИЦИРОВАНА)
+; Стиль слова
 ;===============================================================================
 Procedure.i WordStyle(w$, nextIsParen)
   Protected lw$ = LCase(w$)
 
-  ; Проверяем конкретные ключевые слова с особыми стилями
   Select lw$
     Case "gay"
       ProcedureReturn #STYLE_KEYWORD_GAY
-    Case "lesbian", "cis", "nocis", "sex", "quuer"
+    Case "lesbian", "cis", "nocis", "sex", "queer"
       ProcedureReturn #STYLE_KEYWORD_LESBIAN
     Case "gender", "asexual"
       ProcedureReturn #STYLE_KEYWORD_GENDER
-       Case "homo"
+    Case "homo"
       ProcedureReturn #STYLE_KEYWORD_GAY
-   
   EndSelect
 
-  ; Остальные ключевые слова используют общий стиль
   If FindMapElement(Keywords(), lw$) : ProcedureReturn #STYLE_KEYWORD : EndIf
   If FindMapElement(Builtins(), w$) : ProcedureReturn #STYLE_BUILTIN : EndIf
   If FindMapElement(DeclaredFunctions(), w$) : ProcedureReturn #STYLE_FUNCTION : EndIf
@@ -545,8 +545,7 @@ Procedure UpdateWordUnderCaret(Gadget)
 
   If Not *TextBuf Or TextBufLen <> docLen Or docLen = 0 : ProcedureReturn : EndIf
 
-  If ScintillaSendMessage(Gadget, #SCI_GETSELECTIONSTART, 0, 0) <>0 
-     ScintillaSendMessage(Gadget, #SCI_GETSELECTIONEND, 0, 0)
+  If ScintillaSendMessage(Gadget, #SCI_GETSELECTIONSTART, 0, 0) <> ScintillaSendMessage(Gadget, #SCI_GETSELECTIONEND, 0, 0)
     ProcedureReturn
   EndIf
 
@@ -801,7 +800,7 @@ Procedure ScintillaCB(Gadget, *scinotify.SCNotification)
 EndProcedure
 
 ;===============================================================================
-; Настройка Scintilla — VS Code Dark+ тема (МОДИФИЦИРОВАНА)
+; Настройка Scintilla
 ;===============================================================================
 Procedure SetStyle(Gadget, style, fore, back = #VS_EDITOR_BG, bold = #False, italic = #False)
   ScintillaSendMessage(Gadget, #SCI_STYLESETFORE, style, fore)
@@ -820,13 +819,11 @@ Procedure SetupScintilla(Gadget)
   ScintillaSendMessage(Gadget, #SCI_SETCODEPAGE, #SC_CP_UTF8, 0)
   ScintillaSendMessage(Gadget, #SCI_SETEOLMODE, #SC_EOL_LF, 0)
 
-  ;--- Без горизонтальной прокрутки ---
   ScintillaSendMessage(Gadget, #SCI_SETSCROLLWIDTHTRACKING, #False, 0)
   ScintillaSendMessage(Gadget, #SCI_SETSCROLLWIDTH, 1, 0)
   ScintillaSendMessage(Gadget, #SCI_SETWRAPMODE, #SC_WRAP_WORD, 0)
   ScintillaSendMessage(Gadget, #SCI_SETHSCROLLBAR, #False, 0)
 
-  ; поля
   ScintillaSendMessage(Gadget, #SCI_SETMARGINTYPEN,  0, #SC_MARGIN_NUMBER)
   ScintillaSendMessage(Gadget, #SCI_SETMARGINWIDTHN, 0, 54)
   ScintillaSendMessage(Gadget, #SCI_STYLESETBACK, #STYLE_LINENUMBER, #VS_EDITOR_BG)
@@ -839,14 +836,12 @@ Procedure SetupScintilla(Gadget)
   ScintillaSendMessage(Gadget, #SCI_MARKERSETFORE, #MARKER_ERROR, #VS_TEXT)
   ScintillaSendMessage(Gadget, #SCI_MARKERSETBACK, #MARKER_ERROR, #PR_RED)
 
-  ; каретка и выделение
   ScintillaSendMessage(Gadget, #SCI_SETCARETFORE, #VS_CARET)
   ScintillaSendMessage(Gadget, #SCI_SETCARETWIDTH, 2, 0)
   ScintillaSendMessage(Gadget, #SCI_SETCARETLINEVISIBLE, #True, 0)
   ScintillaSendMessage(Gadget, #SCI_SETCARETLINEBACK, #VS_CURRENT_LINE, 0)
   ScintillaSendMessage(Gadget, #SCI_SETSELBACK, #True, #VS_SELECTION)
 
-  ; отступы
   ScintillaSendMessage(Gadget, #SCI_SETTABWIDTH, 4, 0)
   ScintillaSendMessage(Gadget, #SCI_SETUSETABS, #False, 0)
   ScintillaSendMessage(Gadget, #SCI_SETINDENTATIONGUIDES, #SC_IV_LOOKBOTH, 0)
@@ -858,26 +853,23 @@ Procedure SetupScintilla(Gadget)
   ScintillaSendMessage(Gadget, #SCI_SETLAYOUTCACHE, #SC_CACHE_PAGE, 0)
   ScintillaSendMessage(Gadget, #SCI_SETMODEVENTMASK, #SC_MOD_INSERTTEXT | #SC_MOD_DELETETEXT)
 
-  ; цвета токенов как в VS Code
-  SetStyle(Gadget, #STYLE_KEYWORD,            #PR_PINK,           #VS_EDITOR_BG, #True)  ; Ключевые слова - розовые + жирный
-  SetStyle(Gadget, #STYLE_FUNCTION,           #PR_YELLOW)         ; Функции - желтые
-  SetStyle(Gadget, #STYLE_STRING,             #PR_ORANGE)         ; Строки - оранжевые
-  SetStyle(Gadget, #STYLE_COMMENT,            $6A9955, #VS_EDITOR_BG, #False, #True) ; Комментарии - зеленые
-  SetStyle(Gadget, #STYLE_NUMBER,             $B5CEA8)            ; Числа - светло-зеленые
-  SetStyle(Gadget, #STYLE_OPERATOR,           #VS_TEXT)           ; Операторы - белые
-  SetStyle(Gadget, #STYLE_VARIABLE,           #PR_CYAN)           ; Переменные - бирюзовые
-  SetStyle(Gadget, #STYLE_PARAMETER,          #PR_BLUE)           ; Параметры - синие
-  SetStyle(Gadget, #STYLE_TYPE,               #PR_VIOLET)         ; Типы - фиолетовые
-  SetStyle(Gadget, #STYLE_CONSTANT,           #PR_VIOLET)         ; Константы - фиолетовые
-  SetStyle(Gadget, #STYLE_BUILTIN,            #PR_GREEN)          ; Встроенные - зеленые
+  SetStyle(Gadget, #STYLE_KEYWORD,            #PR_PINK,           #VS_EDITOR_BG, #True)
+  SetStyle(Gadget, #STYLE_FUNCTION,           #PR_YELLOW)
+  SetStyle(Gadget, #STYLE_STRING,             #PR_ORANGE)
+  SetStyle(Gadget, #STYLE_COMMENT,            $6A9955, #VS_EDITOR_BG, #False, #True)
+  SetStyle(Gadget, #STYLE_NUMBER,             $B5CEA8)
+  SetStyle(Gadget, #STYLE_OPERATOR,           #VS_TEXT)
+  SetStyle(Gadget, #STYLE_VARIABLE,           #PR_CYAN)
+  SetStyle(Gadget, #STYLE_PARAMETER,          #PR_BLUE)
+  SetStyle(Gadget, #STYLE_TYPE,               #PR_VIOLET)
+  SetStyle(Gadget, #STYLE_CONSTANT,           #PR_VIOLET)
+  SetStyle(Gadget, #STYLE_BUILTIN,            #PR_GREEN)
 
-  ; Новые стили для ключевых слов
-  SetStyle(Gadget, #STYLE_KEYWORD_GAY,        RGB(0, 190, 255),   #VS_EDITOR_BG, #True)   ; gay - голубой + жирный
-  SetStyle(Gadget, #STYLE_KEYWORD_LESBIAN,    RGB(255, 105, 180), #VS_EDITOR_BG, #True)   ; lesbian - розовый + жирный
-  SetStyle(Gadget, #STYLE_KEYWORD_GENDER,     RGB(255, 255, 255), #VS_EDITOR_BG, #True)    ; gender - белый + жирный
- SetStyle(Gadget, #STYLE_KEYWORD_PRIDE,     #Yellow, #VS_EDITOR_BG, #True)    ; gender - белый + жирный
+  SetStyle(Gadget, #STYLE_KEYWORD_GAY,        RGB(0, 190, 255),   #VS_EDITOR_BG, #True)
+  SetStyle(Gadget, #STYLE_KEYWORD_LESBIAN,    RGB(255, 105, 180), #VS_EDITOR_BG, #True)
+  SetStyle(Gadget, #STYLE_KEYWORD_GENDER,     RGB(255, 255, 255), #VS_EDITOR_BG, #True)
+  SetStyle(Gadget, #STYLE_KEYWORD_PRIDE,      #Yellow, #VS_EDITOR_BG, #True)
 
-  ; индикаторы
   ScintillaSendMessage(Gadget, #SCI_INDICSETSTYLE, #IND_WORD, #INDIC_PLAIN)
   ScintillaSendMessage(Gadget, #SCI_INDICSETFORE,  #IND_WORD, #PR_YELLOW)
   ScintillaSendMessage(Gadget, #SCI_INDICSETALPHA, #IND_WORD, 200)
@@ -888,6 +880,7 @@ Procedure SetupScintilla(Gadget)
   ScintillaSendMessage(Gadget, #SCI_INDICSETUNDER, #IND_ERROR, #False)
 EndProcedure
 
+;===============================================================================
 ; ТУЛБАР
 ;===============================================================================
 Procedure AddTB(cmd, text$, accent, rainbow = #False)
@@ -895,17 +888,15 @@ Procedure AddTB(cmd, text$, accent, rainbow = #False)
   TB()\cmd     = cmd
   TB()\text$   = text$
   TB()\accent  = accent
-
   TB()\h       = 30
 EndProcedure
 
 Procedure InitToolbar()
-  ;ClearList(TB())
-  
   AddTB(#CMD_OPEN,    "Открыть",      #VS_BG)
   AddTB(#CMD_SAVE,    "Сохранить",    #VS_BG)
   AddTB(#CMD_RUN,     "▶ Выполнить",  #PR_GREEN)
-  AddTB(#CMD_COMPILE, "⚙ Компиляция", #PR_BLUE)  ; Новая кнопка для компиляции
+  AddTB(#CMD_COMPILE, "⚙ Компиляция", #PR_BLUE)
+  AddTB(#CMD_GENERATE_IMAGE, "🖼 Изображение", #PR_VIOLET)
   AddTB(#CMD_CLEAR,   "✕ Очистить",   #PR_RED)
   AddTB(#CMD_EXIT,    "Выход",        #PR_RED)
 EndProcedure
@@ -921,7 +912,6 @@ Procedure DrawToolbar()
 
   If Not StartDrawing(CanvasOutput(#GAD_TOOLBAR)) : ProcedureReturn : EndIf
 
-  ; Благородный фон как в VS Code
   Box(0, 0, w, h, #VS_ACTIVITY_BG)
   DrawRainbowH(0, 0, w, h - #STRIPE_H+30, 0.08, #VS_ACTIVITY_BG)
   DrawRainbowH(0, h - #STRIPE_H+30, w, #STRIPE_H, 0.9)
@@ -952,7 +942,6 @@ Procedure DrawToolbar()
         fg = #VS_TEXT_DIM
       ElseIf TB()\down
         bg = MixColor(#VS_BG, TB()\accent, 0.50)
-        
         fg = #VS_TEXT
       ElseIf TB()\hover
         bg = MixColor(#VS_ACTIVITY_BG, TB()\accent, 0.45)
@@ -1003,7 +992,7 @@ EndProcedure
 
 Procedure SetRunEnabled(state)
   ForEach TB()
-    If TB()\cmd = #CMD_RUN Or TB()\cmd = #CMD_COMPILE
+    If TB()\cmd = #CMD_RUN Or TB()\cmd = #CMD_COMPILE Or TB()\cmd = #CMD_GENERATE_IMAGE
       TB()\disabled = Bool(Not state)
     EndIf
   Next
@@ -1028,10 +1017,6 @@ Procedure DrawStatusBar()
     Case 2 : base = #PR_GREEN
     Default: base = #VS_STATUS_BG
   EndSelect
-
-  ; Статус бар как в VS Code
-  ;Box(0, 0, w, h, MixColor(base, #VS_BG, 0.3))
-  ;DrawRainbowH(0, 0, w, 2, 0.7)
 
   If FontUI : DrawingFont(FontID(FontUI)) : EndIf
   DrawingMode(#PB_2DDrawing_Transparent)
@@ -1075,16 +1060,14 @@ Procedure LayoutUI()
   w = WindowWidth(0)
   h = WindowHeight(0)
 
-  ;ResizeGadget(#GAD_TOOLBAR, 0, 0, w+700, #TOOLBAR_H+40)
-
   bx = 10
   ForEach TB()
     Select TB()\cmd
       Case #CMD_OPEN  : TB()\w = 80
       Case #CMD_SAVE  : TB()\w = 90
-      
       Case #CMD_RUN   : TB()\w = 100
-      Case #CMD_COMPILE : TB()\w = 110  ; Ширина для кнопки компиляции
+      Case #CMD_COMPILE : TB()\w = 110
+      Case #CMD_GENERATE_IMAGE : TB()\w = 110
       Case #CMD_CLEAR : TB()\w = 90
       Case #CMD_EXIT  : TB()\w = 70
       Default         : TB()\w = 80
@@ -1102,15 +1085,11 @@ Procedure LayoutUI()
 
   splitH = h - #TOOLBAR_H - #STATUS_H
   If splitH < 140 : splitH = 140 : EndIf
- 
- ; ResizeGadget(#GAD_SPLIT, 0, #TOOLBAR_H-20, w, splitH)
 
   pos = (splitH * #EDITOR_RATIO) / 100
   If pos < 60 : pos = 60 : EndIf
   If pos > splitH - 60 : pos = splitH - 60 : EndIf
   SetGadgetState(#GAD_SPLIT, pos)
-
-  ;ResizeGadget(#GAD_STATUS, 0, h - #STATUS_H - 50, w, #STATUS_H+60)
 
   DrawToolbar()
   DrawStatusBar()
@@ -1310,6 +1289,792 @@ Procedure LoadFileToEditor(File$)
 EndProcedure
 
 ;===============================================================================
+; ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+;===============================================================================
+Procedure.i GenerateLGBTImageWithAPI(apiKey$, filename$ = "lgbt.png")
+  Protected Process, out$, err$, lo$
+  Protected errCount, exitCode
+  Protected startMs.q, elapsed.q
+  Protected params$, workDir$
+  Protected code$
+  Protected startPos, endPos, extractedFile$
+  
+  If apiKey$ = ""
+    MessageRequester("Ошибка", "API ключ не может быть пустым")
+    ProcedureReturn #False
+  EndIf
+  
+  If filename$ = ""
+    filename$ = "lgbt.png"
+  EndIf
+  
+  ; Проверка расширения
+  If Not (Right(filename$, 4) = ".png" Or Right(filename$, 4) = ".jpg" Or Right(filename$, 5) = ".jpeg")
+    filename$ = filename$ + ".png"
+  EndIf
+  
+  If FileSize("rb.exe") <= 0
+    MessageRequester("Ошибка", "rb.exe не найден в директории: " + GetCurrentDirectory())
+    ProcedureReturn #False
+  EndIf
+  
+  ; Формируем код для выполнения через -c
+  ; Используем функцию lgbtImg с параметрами: промпт, ширина, высота
+  code$ = "lgbtImg(" + Chr(34) + "LGBTQ+ pride rainbow flag, diversity, inclusion, love" + Chr(34) + ", 1024, 768);"
+  
+  workDir$ = GetCurrentDirectory()
+  params$  = "-c " + Chr(34) + code$ + Chr(34)
+  
+  LogLine("Генерация изображения через lgbtImg...", #LOG_INFO)
+  LogLine("Команда: rb.exe " + params$)
+  Status("Генерация изображения...")
+  SetRunEnabled(#False)
+  
+  startMs = ElapsedMilliseconds()
+  
+  Process = RunProgram("rb.exe", params$, workDir$,
+            #PB_Program_Open | #PB_Program_Read | #PB_Program_Error | #PB_Program_Hide)
+  
+  If Not Process
+    LogError("Не удалось запустить rb.exe для генерации изображения")
+    Status("Ошибка генерации", 1)
+    SetRunEnabled(#True)
+    ProcedureReturn #False
+  EndIf
+  
+  While ProgramRunning(Process)
+    While AvailableProgramOutput(Process)
+      out$ = ReadProgramString(Process)
+      If out$ <> ""
+        lo$ = LCase(out$)
+        ; Ищем имя сгенерированного файла в выводе
+        If FindString(lo$, ".png") Or FindString(lo$, ".jpg") Or FindString(lo$, ".jpeg")
+          ; Пытаемся извлечь имя файла из вывода
+          If FindString(out$, "сохранено:", 1) Or FindString(out$, "saved:", 1)
+            startPos = FindString(out$, "сохранено:", 1)
+            If startPos = 0 : startPos = FindString(out$, "saved:", 1) : EndIf
+            If startPos > 0
+              startPos + 10
+              endPos = FindString(out$, " ", startPos)
+              If endPos = 0 : endPos = Len(out$) : EndIf
+              extractedFile$ = Trim(Mid(out$, startPos, endPos - startPos))
+              If extractedFile$ <> "" And FileSize(extractedFile$) > 0
+                filename$ = extractedFile$
+              EndIf
+            EndIf
+          EndIf
+          LogLine(out$, #LOG_OK)
+        ElseIf FindString(lo$, "error") Or FindString(lo$, "ошибка") Or
+               FindString(lo$, "fatal") Or FindString(lo$, "exception")
+          LogError(out$)
+          errCount + 1
+        Else
+          LogLine(out$)
+        EndIf
+      EndIf
+    Wend
+    
+    err$ = ReadProgramError(Process)
+    If err$ <> ""
+      LogError(err$)
+      errCount + 1
+    EndIf
+    
+    While WindowEvent() : Wend
+    Delay(1)
+  Wend
+  
+  ; Читаем оставшиеся выводы
+  While AvailableProgramOutput(Process)
+    out$ = ReadProgramString(Process)
+    If out$ <> ""
+      LogLine(out$)
+      ; Пытаемся найти имя файла
+      If FindString(out$, "сохранено:", 1) Or FindString(out$, "saved:", 1)
+        startPos = FindString(out$, "сохранено:", 1)
+        If startPos = 0 : startPos = FindString(out$, "saved:", 1) : EndIf
+        If startPos > 0
+          startPos + 10
+          endPos = FindString(out$, " ", startPos)
+          If endPos = 0 : endPos = Len(out$) : EndIf
+          extractedFile$ = Trim(Mid(out$, startPos, endPos - startPos))
+          If extractedFile$ <> "" And FileSize(extractedFile$) > 0
+            filename$ = extractedFile$
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Wend
+  
+  Repeat
+    err$ = ReadProgramError(Process)
+    If err$ = "" : Break : EndIf
+    LogError(err$)
+    errCount + 1
+  ForEver
+  
+  exitCode = ProgramExitCode(Process)
+  CloseProgram(Process)
+  
+  elapsed = ElapsedMilliseconds() - startMs
+  LogLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  
+  ; Проверяем наличие файла изображения
+  If FileSize(filename$) <= 0
+    Protected pattern$ = "*.png"
+    If ExamineDirectory(0, workDir$, pattern$)
+      While NextDirectoryEntry(0)
+        If DirectoryEntryType(0) = #PB_DirectoryEntry_File
+          Protected entry$ = DirectoryEntryName(0)
+          ; Проверяем, что файл создан недавно (в течение последних 30 секунд)
+          If FileSize(entry$) > 0
+            filename$ = entry$
+            Break
+          EndIf
+        EndIf
+      Wend
+      FinishDirectory(0)
+    EndIf
+  EndIf
+  
+  If exitCode = 0 And errCount = 0 And FileSize(filename$) > 0
+    LogLine("✅ Изображение сгенерировано за " + Str(elapsed) + " мс", #LOG_OK)
+    LogLine("📁 Файл: " + filename$, #LOG_OK)
+    Status("Изображение готово: " + filename$, 2)
+    
+    ; Показываем изображение в отдельном окне
+    ShowGeneratedImage(filename$)
+    ProcedureReturn #True
+  Else
+    LogError("❌ Ошибка генерации изображения")
+    LogError("Код возврата: " + Str(exitCode) + " | ошибок: " + Str(errCount))
+    Status("Ошибка генерации", 1)
+    
+    If errCount > 0
+      LogLine("Проверьте правильность API ключа и интернет-соединение")
+    EndIf
+    
+    SetRunEnabled(#True)
+    ProcedureReturn #False
+  EndIf
+  
+  SetRunEnabled(#True)
+EndProcedure
+;===============================================================================
+; ОКНО ПРОСМОТРА ИЗОБРАЖЕНИЯ
+;===============================================================================
+;===============================================================================
+; ОКНО ПРОСМОТРА ИЗОБРАЖЕНИЯ
+;===============================================================================
+
+Procedure ShowGeneratedImage(filename$)
+  Protected imgWin, imgGadget, img, w, h, flags, btnOpen, btnClose
+  
+  If FileSize(filename$) <= 0
+    MessageRequester("Ошибка", "Файл изображения не найден: " + filename$)
+    ProcedureReturn
+  EndIf
+  
+  ; Загружаем изображение
+  img = LoadImage(#PB_Any, filename$)
+  If Not img
+    ;MessageRequester("Ошибка", "Не удалось загрузить изображение: " + filename$)
+    ProcedureReturn
+  EndIf
+  
+  ; Определяем размеры окна
+  w = ImageWidth(img)
+  h = ImageHeight(img)
+  
+  ; Ограничиваем размер окна
+  If w > 800
+    w = 800
+    h = ImageHeight(img) * 800 / ImageWidth(img)
+  EndIf
+  If h > 600
+    h = 600
+    w = ImageWidth(img) * 600 / ImageHeight(img)
+  EndIf
+  
+  ; Создаём окно
+  flags = #PB_Window_SystemMenu | #PB_Window_TitleBar | #PB_Window_ScreenCentered | #PB_Window_SizeGadget
+  
+  imgWin = OpenWindow(#PB_Any, 0, 0, w + 20, h + 70, "🏳️‍🌈 ЛГБТ-изображение", flags)
+  If Not imgWin
+    FreeImage(img)
+    ProcedureReturn
+  EndIf
+  
+  ; Добавляем ImageGadget
+  imgGadget = ImageGadget(#PB_Any, 10, 10, w, h, img, #PB_Image_Border)
+  
+  ; Информация о файле
+  TextGadget(#PB_Any, 10, h + 20, w, 25, "Файл: " + GetFilePart(filename$) + "  |  " + 
+             Str(ImageWidth(img)) + "x" + Str(ImageHeight(img)) + " px", #PB_Text_Center)
+  
+  ; Кнопка "Открыть папку"
+  btnOpen = ButtonGadget(#PB_Any, w - 230, h + 20, 110, 25, "📁 Открыть папку")
+  
+  ; Кнопка "Закрыть"
+  btnClose = ButtonGadget(#PB_Any, w - 110, h + 20, 100, 25, "✖ Закрыть")
+  
+  Repeat
+    Select WaitWindowEvent()
+      Case #PB_Event_CloseWindow
+        Break
+        
+      Case #PB_Event_Gadget
+        Select EventGadget()
+          Case imgGadget
+            ; Клик по изображению - открываем в программе просмотра
+            CompilerIf #PB_Compiler_OS = #PB_OS_Windows
+              RunProgram("mspaint.exe", filename$, "")
+            CompilerElseIf #PB_Compiler_OS = #PB_OS_MacOS
+              RunProgram("open", filename$, "")
+            CompilerElse
+              RunProgram("xdg-open", filename$, "")
+            CompilerEndIf
+            
+          Case btnOpen
+            ; Открываем папку с файлом
+            CompilerIf #PB_Compiler_OS = #PB_OS_Windows
+              RunProgram("explorer.exe", "/select," + Chr(34) + filename$ + Chr(34), "")
+            CompilerElseIf #PB_Compiler_OS = #PB_OS_MacOS
+              RunProgram("open", GetPathPart(filename$), "")
+            CompilerElse
+              RunProgram("xdg-open", GetPathPart(filename$), "")
+            CompilerEndIf
+            
+          Case btnClose
+            Break
+        EndSelect
+    EndSelect
+  ForEver
+  
+  CloseWindow(imgWin)
+  FreeImage(img)
+EndProcedure
+
+;===============================================================================
+; ДИАЛОГ ВВОДА API КЛЮЧА
+;===============================================================================
+;===============================================================================
+; ДИАЛОГ ВВОДА API КЛЮЧА (ИСПРАВЛЕННЫЙ)
+;===============================================================================
+;===============================================================================
+; ДИАЛОГ ВВОДА API КЛЮЧА (ИСПРАВЛЕННЫЙ)
+;===============================================================================
+;===============================================================================
+; ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ ЧЕРЕЗ -lgbtimg (ПРЯМОЙ ВЫЗОВ)
+;===============================================================================
+
+Procedure.i GenerateLGBTImageDirect(apiKey$, filename$ = "lgbt.png")
+  Protected Process, out$, err$, lo$
+  Protected errCount, exitCode
+  Protected startMs.q, elapsed.q
+  Protected params$, workDir$
+  Protected startPos, endPos, extractedFile$
+  
+  If apiKey$ = ""
+    MessageRequester("Ошибка", "API ключ не может быть пустым")
+    ProcedureReturn #False
+  EndIf
+  
+  If filename$ = ""
+    filename$ = "lgbt.png"
+  EndIf
+  
+  ; Проверка расширения
+  If Not (Right(filename$, 4) = ".png" Or Right(filename$, 4) = ".jpg" Or Right(filename$, 5) = ".jpeg")
+    filename$ = filename$ + ".png"
+  EndIf
+  
+  If FileSize("rb.exe") <= 0
+    MessageRequester("Ошибка", "rb.exe не найден в директории: " + GetCurrentDirectory())
+    ProcedureReturn #False
+  EndIf
+  
+  workDir$ = GetCurrentDirectory()
+  params$  = "-lgbtimg " + Chr(34) + filename$ + Chr(34) + " " + Chr(34) + apiKey$ + Chr(34)
+  
+  LogLine("Генерация изображения через -lgbtimg...", #LOG_INFO)
+  LogLine("Команда: rb.exe " + params$)
+  Status("Генерация изображения...")
+  SetRunEnabled(#False)
+  
+  startMs = ElapsedMilliseconds()
+  
+  Process = RunProgram("rb.exe", params$, workDir$,
+            #PB_Program_Open | #PB_Program_Read | #PB_Program_Error | #PB_Program_Hide)
+  
+  If Not Process
+    LogError("Не удалось запустить rb.exe для генерации изображения")
+    Status("Ошибка генерации", 1)
+    SetRunEnabled(#True)
+    ProcedureReturn #False
+  EndIf
+  
+  While ProgramRunning(Process)
+    While AvailableProgramOutput(Process)
+      out$ = ReadProgramString(Process)
+      If out$ <> ""
+        lo$ = LCase(out$)
+        ; Ищем информацию о сохранённом файле
+        If FindString(lo$, ".png") Or FindString(lo$, ".jpg") Or FindString(lo$, ".jpeg")
+          If FindString(out$, "сохранено:", 1) Or FindString(out$, "saved:", 1)
+            startPos = FindString(out$, "сохранено:", 1)
+            If startPos = 0 : startPos = FindString(out$, "saved:", 1) : EndIf
+            If startPos > 0
+              startPos + 10
+              endPos = FindString(out$, " ", startPos)
+              If endPos = 0 : endPos = Len(out$) : EndIf
+              extractedFile$ = Trim(Mid(out$, startPos, endPos - startPos))
+              If extractedFile$ <> "" And FileSize(extractedFile$) > 0
+                filename$ = extractedFile$
+              EndIf
+            EndIf
+          EndIf
+          LogLine(out$, #LOG_OK)
+        ElseIf FindString(lo$, "error") Or FindString(lo$, "ошибка") Or
+               FindString(lo$, "fatal") Or FindString(lo$, "exception")
+          LogError(out$)
+          errCount + 1
+        Else
+          LogLine(out$)
+        EndIf
+      EndIf
+    Wend
+    
+    err$ = ReadProgramError(Process)
+    If err$ <> ""
+      LogError(err$)
+      errCount + 1
+    EndIf
+    
+    While WindowEvent() : Wend
+    Delay(1)
+  Wend
+  
+  ; Читаем оставшиеся выводы
+  While AvailableProgramOutput(Process)
+    out$ = ReadProgramString(Process)
+    If out$ <> ""
+      LogLine(out$)
+      If FindString(out$, "сохранено:", 1) Or FindString(out$, "saved:", 1)
+        startPos = FindString(out$, "сохранено:", 1)
+        If startPos = 0 : startPos = FindString(out$, "saved:", 1) : EndIf
+        If startPos > 0
+          startPos + 10
+          endPos = FindString(out$, " ", startPos)
+          If endPos = 0 : endPos = Len(out$) : EndIf
+          extractedFile$ = Trim(Mid(out$, startPos, endPos - startPos))
+          If extractedFile$ <> "" And FileSize(extractedFile$) > 0
+            filename$ = extractedFile$
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Wend
+  
+  Repeat
+    err$ = ReadProgramError(Process)
+    If err$ = "" : Break : EndIf
+    LogError(err$)
+    errCount + 1
+  ForEver
+  
+  exitCode = ProgramExitCode(Process)
+  CloseProgram(Process)
+  
+  elapsed = ElapsedMilliseconds() - startMs
+  LogLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  
+  ; Если файл не найден, ищем по маске
+  If FileSize(filename$) <= 0
+    Protected pattern$ = "*.png"
+    If ExamineDirectory(0, workDir$, pattern$)
+      While NextDirectoryEntry(0)
+        If DirectoryEntryType(0) = #PB_DirectoryEntry_File
+          Protected entry$ = DirectoryEntryName(0)
+          ; Проверяем, что файл создан недавно (в течение последних 30 секунд)
+          Protected fileTime = GetFileDate(workDir$ + entry$, #PB_Date_Modified)
+          If fileTime > Date() - 30 And FileSize(workDir$ + entry$) > 0
+            filename$ = entry$
+            Break
+          EndIf
+        EndIf
+      Wend
+      FinishDirectory(0)
+    EndIf
+  EndIf
+  
+  If exitCode = 0 And errCount = 0 And FileSize(filename$) > 0
+    LogLine("✅ Изображение сгенерировано за " + Str(elapsed) + " мс", #LOG_OK)
+    LogLine("📁 Файл: " + filename$, #LOG_OK)
+    Status("Изображение готово: " + filename$, 2)
+    
+    ; Показываем изображение в отдельном окне
+    ShowGeneratedImage(filename$)
+    ProcedureReturn #True
+  Else
+    LogError("❌ Ошибка генерации изображения")
+    LogError("Код возврата: " + Str(exitCode) + " | ошибок: " + Str(errCount))
+    Status("Ошибка генерации", 1)
+    
+    If errCount > 0
+      LogLine("Проверьте правильность API ключа и интернет-соединение")
+    EndIf
+    
+    SetRunEnabled(#True)
+    ProcedureReturn #False
+  EndIf
+  
+  SetRunEnabled(#True)
+EndProcedure
+
+;===============================================================================
+; ДИАЛОГ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЯ (БЕЗ API КЛЮЧА)
+;===============================================================================
+
+;===============================================================================
+; ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ ЧЕРЕЗ POLLINATIONS.AI (БЕСПЛАТНО)
+;===============================================================================
+;===============================================================================
+; ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ ЧЕРЕЗ POLLINATIONS.AI (БЕСПЛАТНО)
+;===============================================================================
+
+Procedure.i GenerateLGBTImagePollinations(prompt$, filename$ = "lgbt.png")
+  Protected Process, out$, err$, lo$
+  Protected errCount, exitCode
+  Protected startMs.q, elapsed.q
+  Protected params$, workDir$
+  Protected code$
+  Protected width, height
+  Protected startPos, endPos, extractedFile$
+  Protected pattern$, entry$, fileTime
+  Protected dir, found
+  Protected tempFile$, fileID
+  
+  If prompt$ = ""
+    prompt$ = "LGBTQ+ pride rainbow flag, diversity, inclusion, love"
+  EndIf
+  
+  If filename$ = ""
+    filename$ = "lgbt.png"
+  EndIf
+  
+  ; Проверка расширения
+  If Not (Right(filename$, 4) = ".png") And Not (Right(filename$, 4) = ".jpg") And Not (Right(filename$, 5) = ".jpeg")
+    filename$ = filename$ + ".png"
+  EndIf
+  
+  ; Используем размеры по умолчанию
+  width = 1024
+  height = 768
+  
+  If FileSize("rb.exe") <= 0
+    MessageRequester("Ошибка", "rb.exe не найден в директории: " + GetCurrentDirectory())
+    ProcedureReturn #False
+  EndIf
+  
+  ; Создаём временный файл со скриптом вместо использования -c
+  tempFile$ = GetTemporaryDirectory() + "temp_gen.rainbow"
+  
+  ; Формируем код для временного файла - используем простой промпт без специальных символов
+  ; Экранируем кавычки в промпте для LGBTScript
+  prompt$ = ReplaceString(prompt$, Chr(34), "'")
+  
+  ; Ограничиваем длину промпта
+  If Len(prompt$) > 200
+    prompt$ = Left(prompt$, 200)
+  EndIf
+  
+  ; Записываем код во временный файл
+  fileID = CreateFile(#PB_Any, tempFile$)
+  If fileID
+    WriteStringN(fileID, "@ Генерация изображения")
+    WriteStringN(fileID, "")
+    WriteStringN(fileID, "rainbow main() {")
+    WriteStringN(fileID, "    comingout " + Chr(34) + "🏳️‍🌈 Генерация ЛГБТ-изображения..." + Chr(34) + ";")
+    WriteStringN(fileID, "    comingout " + Chr(34) + "📝 Промпт: " + prompt$ + Chr(34) + ";")
+    WriteStringN(fileID, "    gay width = " + Str(width) + ";")
+    WriteStringN(fileID, "    gay height = " + Str(height) + ";")
+    WriteStringN(fileID, "    lgbtImg(" + Chr(34) + prompt$ + Chr(34) + ", width, height);")
+    WriteStringN(fileID, "    comingout " + Chr(34) + "✅ Генерация завершена!" + Chr(34) + ";")
+    WriteStringN(fileID, "}")
+    WriteStringN(fileID, "")
+    WriteStringN(fileID, "main();")
+    CloseFile(fileID)
+  Else
+    LogError("Не удалось создать временный файл: " + tempFile$)
+    Status("Ошибка создания файла", 1)
+    ProcedureReturn #False
+  EndIf
+  
+  workDir$ = GetCurrentDirectory()
+  params$  = "-lgbt " + Chr(34) + tempFile$ + Chr(34)
+  
+  LogLine("Генерация изображения...", #LOG_INFO)
+  LogLine("Промпт: " + prompt$, #LOG_INFO)
+  LogLine("Временный файл: " + tempFile$, #LOG_INFO)
+  LogLine("Команда: rb.exe " + params$)
+  Status("Генерация изображения...")
+  SetRunEnabled(#False)
+  
+  startMs = ElapsedMilliseconds()
+  
+  Process = RunProgram("rb.exe", params$, workDir$,
+            #PB_Program_Open | #PB_Program_Read | #PB_Program_Error | #PB_Program_Hide)
+  
+  If Not Process
+    LogError("Не удалось запустить rb.exe для генерации изображения")
+    Status("Ошибка генерации", 1)
+    SetRunEnabled(#True)
+    ; Удаляем временный файл
+    DeleteFile(tempFile$)
+    ProcedureReturn #False
+  EndIf
+  
+  errCount = 0
+  extractedFile$ = ""
+  
+  While ProgramRunning(Process)
+    While AvailableProgramOutput(Process)
+      out$ = ReadProgramString(Process)
+      If out$ <> ""
+        lo$ = LCase(out$)
+        
+        ; Ищем имя сгенерированного файла в выводе
+        If FindString(lo$, ".png", 1) Or FindString(lo$, ".jpg", 1) Or FindString(lo$, ".jpeg", 1)
+          ; Пытаемся извлечь имя файла из вывода
+          If FindString(out$, "сохранено:", 1) Or FindString(out$, "saved:", 1)
+            startPos = FindString(out$, "сохранено:", 1)
+            If startPos = 0
+              startPos = FindString(out$, "saved:", 1)
+            EndIf
+            If startPos > 0
+              startPos = startPos + 10
+              endPos = FindString(out$, " ", startPos)
+              If endPos = 0
+                endPos = Len(out$)
+              EndIf
+              extractedFile$ = Trim(Mid(out$, startPos, endPos - startPos))
+              If extractedFile$ <> "" And FileSize(extractedFile$) > 0
+                filename$ = extractedFile$
+              EndIf
+            EndIf
+          EndIf
+          LogLine(out$, #LOG_OK)
+        ElseIf FindString(lo$, "error", 1) Or FindString(lo$, "ошибка", 1)
+          LogError(out$)
+          errCount = errCount + 1
+        ElseIf FindString(lo$, "fatal", 1) Or FindString(lo$, "exception", 1)
+          LogError(out$)
+          errCount = errCount + 1
+        Else
+          LogLine(out$)
+        EndIf
+      EndIf
+    Wend
+    
+    err$ = ReadProgramError(Process)
+    If err$ <> ""
+      LogError(err$)
+      errCount = errCount + 1
+    EndIf
+    
+    While WindowEvent() : Wend
+    Delay(1)
+  Wend
+  
+  ; Читаем оставшиеся выводы
+  While AvailableProgramOutput(Process)
+    out$ = ReadProgramString(Process)
+    If out$ <> ""
+      LogLine(out$)
+      ; Пытаемся найти имя файла
+      If FindString(out$, "сохранено:", 1) Or FindString(out$, "saved:", 1)
+        startPos = FindString(out$, "сохранено:", 1)
+        If startPos = 0
+          startPos = FindString(out$, "saved:", 1)
+        EndIf
+        If startPos > 0
+          startPos = startPos + 10
+          endPos = FindString(out$, " ", startPos)
+          If endPos = 0
+            endPos = Len(out$)
+          EndIf
+          extractedFile$ = Trim(Mid(out$, startPos, endPos - startPos))
+          If extractedFile$ <> "" And FileSize(extractedFile$) > 0
+            filename$ = extractedFile$
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+  Wend
+  
+  Repeat
+    err$ = ReadProgramError(Process)
+    If err$ = ""
+      Break
+    EndIf
+    LogError(err$)
+    errCount = errCount + 1
+  ForEver
+  
+  exitCode = ProgramExitCode(Process)
+  CloseProgram(Process)
+  
+  ; Удаляем временный файл
+  DeleteFile(tempFile$)
+  
+  elapsed = ElapsedMilliseconds() - startMs
+  LogLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+  
+  ; Проверяем наличие файла изображения
+  If FileSize(filename$) <= 0
+    pattern$ = "*.png"
+    dir = ExamineDirectory(#PB_Any, workDir$, pattern$)
+    If dir
+      found = #False
+      While NextDirectoryEntry(dir) And found = #False
+        If DirectoryEntryType(dir) = #PB_DirectoryEntry_File
+          entry$ = DirectoryEntryName(dir)
+          ; Проверяем, что файл создан недавно (в течение последних 60 секунд)
+          fileTime = GetFileDate(workDir$ + entry$, #PB_Date_Modified)
+          If fileTime > Date() - 60 And FileSize(workDir$ + entry$) > 0
+            filename$ = entry$
+            found = #True
+          EndIf
+        EndIf
+      Wend
+      FinishDirectory(dir)
+    EndIf
+  EndIf
+  
+  If exitCode = 0 And errCount = 0 And FileSize(filename$) > 0
+    LogLine("✅ Изображение сгенерировано за " + Str(elapsed) + " мс", #LOG_OK)
+    LogLine("📁 Файл: " + filename$, #LOG_OK)
+    Status("Изображение готово: " + filename$, 2)
+    
+    ; Показываем изображение в отдельном окне
+    ShowGeneratedImage(filename$)
+    ProcedureReturn #True
+  Else
+    LogError("❌ Ошибка генерации изображения")
+    LogError("Код возврата: " + Str(exitCode) + " | ошибок: " + Str(errCount))
+    Status("Ошибка генерации", 1)
+    
+    If errCount > 0
+      LogLine("Проверьте интернет-соединение и правильность промпта")
+    EndIf
+    
+    SetRunEnabled(#True)
+    ProcedureReturn #False
+  EndIf
+  
+  SetRunEnabled(#True)
+EndProcedure
+
+
+; ДИАЛОГ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЯ (БЕЗ API КЛЮЧА)
+;===============================================================================
+;===============================================================================
+; ДИАЛОГ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЯ (БЕЗ API КЛЮЧА)
+;===============================================================================
+
+Procedure GenerateImageDialog()
+  Protected win, fileInput, promptInput, okBtn, cancelBtn
+  Protected prompt$, filename$, event, gadget
+  Protected widthInput, heightInput
+  Protected infoText
+  
+  win = OpenWindow(#PB_Any, 0, 0, 480, 280, "🏳️‍🌈 Генерация ЛГБТ-изображения", 
+                   #PB_Window_SystemMenu | #PB_Window_TitleBar | #PB_Window_ScreenCentered)
+  If Not win
+    ProcedureReturn
+  EndIf
+  
+  AddKeyboardShortcut(win, #PB_Shortcut_Return, 999)
+  
+  ; Заголовок
+  TextGadget(#PB_Any, 10, 10, 460, 25, "Генерация ЛГБТ-изображения", #PB_Text_Center)
+  
+  ; Поле для промпта
+  TextGadget(#PB_Any, 10, 45, 80, 25, "Промпт:")
+  promptInput = StringGadget(#PB_Any, 100, 42, 360, 25, "LGBTQ+ pride rainbow flag, diversity, love")
+  
+  ; Поле для имени файла
+  TextGadget(#PB_Any, 10, 80, 80, 25, "Имя файла:")
+  fileInput = StringGadget(#PB_Any, 100, 77, 360, 25, "lgbt.png")
+  
+  ; Поля для размера
+  TextGadget(#PB_Any, 10, 115, 80, 25, "Размер:")
+  widthInput = StringGadget(#PB_Any, 100, 112, 80, 25, "1024")
+  TextGadget(#PB_Any, 190, 115, 30, 25, "x")
+  heightInput = StringGadget(#PB_Any, 220, 112, 80, 25, "768")
+  
+  ; Подсказка
+  infoText = TextGadget(#PB_Any, 10, 145, 460, 20, "💡 Это бесплатно", #PB_Text_Center)
+  SetGadgetColor(infoText, #PB_Gadget_FrontColor, #VS_TEXT_DIM)
+  
+  ; Кнопки
+  okBtn = ButtonGadget(#PB_Any, 280, 175, 90, 30, "Сгенерировать")
+  cancelBtn = ButtonGadget(#PB_Any, 380, 175, 80, 30, "Отмена")
+  
+  SetActiveGadget(promptInput)
+  
+  Repeat
+    event = WaitWindowEvent()
+    
+    Select event
+      Case #PB_Event_CloseWindow
+        Break
+        
+      Case #PB_Event_Menu
+        If EventMenu() = 999
+          PostEvent(#PB_Event_Gadget, win, okBtn, #PB_EventType_LeftClick)
+        EndIf
+        
+      Case #PB_Event_Gadget
+        gadget = EventGadget()
+        Select gadget
+          Case okBtn
+            prompt$ = GetGadgetText(promptInput)
+            filename$ = GetGadgetText(fileInput)
+            
+            If prompt$ = ""
+              prompt$ = "LGBTQ+ pride rainbow flag, diversity, love"
+            EndIf
+            
+            If filename$ = ""
+              filename$ = "lgbt.png"
+            EndIf
+            
+            ; Проверка расширения
+            If Not (Right(filename$, 4) = ".png" Or Right(filename$, 4) = ".jpg" Or Right(filename$, 5) = ".jpeg")
+              filename$ = filename$ + ".png"
+            EndIf
+            
+            CloseWindow(win)
+            
+            ; Генерируем изображение
+            If GenerateLGBTImagePollinations(prompt$, filename$)
+              ; Всё сделано
+            EndIf
+            ProcedureReturn
+            
+          Case cancelBtn
+            CloseWindow(win)
+            ProcedureReturn
+        EndSelect
+    EndSelect
+  ForEver
+  
+  CloseWindow(win)
+EndProcedure
+
+;=================================================
 ; КОМПИЛЯЦИЯ В .EXE
 ;===============================================================================
 Procedure CompileToExe()
@@ -1331,7 +2096,6 @@ Procedure CompileToExe()
     target$ = GetCurrentDirectory() + "main.rainbow"
   EndIf
 
-  ; Сохраняем файл перед компиляцией
   If Not SaveEditorTo(target$)
     LogError("Не удалось сохранить " + target$)
     Status("Ошибка сохранения", 1)
@@ -1339,7 +2103,6 @@ Procedure CompileToExe()
   EndIf
   LogLine("Файл сохранён: " + GetFilePart(target$), #LOG_OK)
 
-  ; Запрашиваем имя для .exe файла
   exeName$ = SaveFileRequester("Сохранить исполняемый файл", 
                                GetPathPart(target$) + GetFilePart(target$, #PB_FileSystem_NoExtension) + ".exe",
                                "EXE файлы (*.exe)|*.exe|Все файлы (*.*)|*.*", 0)
@@ -1357,7 +2120,7 @@ Procedure CompileToExe()
   EndIf
 
   workDir$ = GetCurrentDirectory()
-  params$  = "-b " + Chr(34) + target$ + Chr(34) + " " + Chr(34) + exeName$ + Chr(34)
+  params$  = "-exe " + Chr(34) + target$ + Chr(34) + " " + Chr(34) + exeName$ + Chr(34)
 
   LogLine("Команда: rb.exe " + params$)
   LogLine("Каталог: " + workDir$)
@@ -1410,7 +2173,6 @@ Procedure CompileToExe()
     Delay(1)
   Wend
 
-  ; Читаем оставшиеся выводы
   While AvailableProgramOutput(Process)
     out$ = ReadProgramString(Process)
     If out$ <> ""
@@ -1450,7 +2212,6 @@ Procedure CompileToExe()
     LogLine("📁 Создан файл: " + exeName$, #LOG_OK)
     Status("✅ Компиляция завершена: " + GetFilePart(exeName$), 2)
     
-    ; Предлагаем открыть папку с файлом
     If MessageRequester("Компиляция успешна", 
                         "Исполняемый файл создан:" + #CRLF$ + exeName$ + #CRLF$ + #CRLF$ + 
                         "Открыть папку с файлом?", #PB_MessageRequester_YesNo) = #PB_MessageRequester_Yes
@@ -1655,10 +2416,6 @@ Procedure DoCommand(cmd)
               "Rainbow files (*.rainbow)|*.rainbow|All files (*.*)|*.*", 0)
       If File$ : LoadFileToEditor(File$) : EndIf
       
-      Case    122121
-        SaveFileRequester("Сохранить файл", "main.rainbow",
-                "Rainbow files (*.rainbow)|*.rainbow|All files (*.*)|*.*", 0)
-        
     Case #CMD_SAVE
       If CurrentFile$ = ""
         File$ = SaveFileRequester("Сохранить файл", "main.rainbow",
@@ -1679,7 +2436,6 @@ Procedure DoCommand(cmd)
       EndIf
 
     Case #CMD_SAVEAS
-
       File$ = SaveFileRequester("Сохранить как", "main.rainbow",
               "Rainbow files (*.rainbow)|*.rainbow|All files (*.*)|*.*", 0)
       If File$
@@ -1700,8 +2456,8 @@ Procedure DoCommand(cmd)
     Case #CMD_UNDO  : ScintillaSendMessage(#GAD_EDITOR, #SCI_UNDO,  0, 0)
     Case #CMD_REDO  : ScintillaSendMessage(#GAD_EDITOR, #SCI_REDO,  0, 0)
     Case #CMD_RUN   : RunRainbow()
-    Case #CMD_COMPILE : CompileToExe()  ; Обработка команды компиляции
-    Case 122121
+    Case #CMD_COMPILE : CompileToExe()
+    Case #CMD_GENERATE_IMAGE : GenerateImageDialog()
       
     Case #CMD_CLEAR
       ClearGadgetItems(#GAD_LOG)
@@ -1711,7 +2467,10 @@ Procedure DoCommand(cmd)
 
     Case #CMD_ABOUT
       MessageRequester("О программе",
-        "LGBTScript IDE v9.0")
+        "LGBTScript IDE v9.0" + #CRLF$ +
+        "🏳️‍🌈 Pride Edition" + #CRLF$ + #CRLF$ +
+        "Поддержка ЛГБТ+ сообщества" + #CRLF$ +
+        "Генерация изображений")
   EndSelect
 EndProcedure
 
@@ -1744,7 +2503,6 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
       MenuItem(#CMD_OPEN,   "Открыть..." + Chr(9) + "Ctrl+O")
       MenuItem(#CMD_SAVE,   "Сохранить" + Chr(9) + "Ctrl+S")
       MenuItem(#CMD_SAVEAS, "Сохранить как...")
-         MenuItem(122121, "Сгенерировать ЛГБТ-картинку")
       MenuBar()
       MenuItem(#CMD_EXIT,   "Выход")
     MenuTitle("Правка")
@@ -1756,8 +2514,9 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
       MenuItem(#CMD_REDO,  "Повторить" + Chr(9) + "Ctrl+Y")
     MenuTitle("Запуск")
       MenuItem(#CMD_RUN,   "Выполнить" + Chr(9) + "F5")
-      MenuItem(#CMD_COMPILE, "Создать исполняемый файл")  ; Добавлен пункт меню
-     
+      MenuItem(#CMD_COMPILE, "Создать исполняемый файл")
+      MenuBar()
+      MenuItem(#CMD_GENERATE_IMAGE, "🖼 Сгенерировать ЛГБТ-изображение")
       MenuItem(#CMD_CLEAR, "Очистить лог")
     MenuTitle("Справка")
       MenuItem(#CMD_ABOUT, "О программе")
@@ -1767,6 +2526,7 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   AddKeyboardShortcut(0, #PB_Shortcut_Control | #PB_Shortcut_O, #CMD_OPEN)
   AddKeyboardShortcut(0, #PB_Shortcut_Control | #PB_Shortcut_S, #CMD_SAVE)
   AddKeyboardShortcut(0, #PB_Shortcut_Control | #PB_Shortcut_N, 1919)
+  AddKeyboardShortcut(0, #PB_Shortcut_Control | #PB_Shortcut_G, #CMD_GENERATE_IMAGE)
   AddKeyboardShortcut(0, #PB_Shortcut_Escape, #CMD_RUN)
 
   ;--- тулбар ---
@@ -1806,6 +2566,7 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   HighlightText(#GAD_EDITOR)
   UpdateCaretStatus()
   LogLine("LGBTScript IDE v9.0 запущен", #LOG_OK)
+  LogLine("🏳️‍🌈 Для генерации изображения используйте меню Запуск → Сгенерировать ЛГБТ-изображение", #LOG_INFO)
  
   ;===========================================================================
   ; ЦИКЛ СОБЫТИЙ
@@ -1815,29 +2576,26 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
 
     Select Ev
       
-        
       Case #PB_Event_Menu
         DoCommand(EventMenu())
       
       Case #PB_Event_Gadget
         Select EventGadget()
          
-            
-            
           Case #GAD_TOOLBAR
             mx = GetGadgetAttribute(#GAD_TOOLBAR, #PB_Canvas_MouseX)
             my = GetGadgetAttribute(#GAD_TOOLBAR, #PB_Canvas_MouseY)
 
             Select EventType()
               Case #PB_EventType_MouseMove
-                ;ToolbarHover(mx, my)
+                ToolbarHover(mx, my)
 
               Case #PB_EventType_MouseLeave
                 ForEach TB()
                   TB()\hover = #False
                   TB()\down  = #False
                 Next
-              ;  DrawToolbar()
+                DrawToolbar()
 
               Case #PB_EventType_LeftButtonDown
                 ForEach TB()
@@ -1846,14 +2604,14 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
                     TB()\down = #True
                   EndIf
                 Next
-               ; DrawToolbar()
+                DrawToolbar()
 
               Case #PB_EventType_LeftButtonUp
                 cmd = ToolbarHit(mx, my)
                 ForEach TB()
                   TB()\down = #False
                 Next
-                ;DrawToolbar()
+                DrawToolbar()
                 If cmd
                   ForEach TB()
                     If TB()\cmd = cmd And TB()\disabled : cmd = 0 : EndIf
@@ -1866,7 +2624,6 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
             If EventType() = #PB_EventType_Change
               ClearErrorMarks()
             EndIf
-            
              
           Case #GAD_LOG
             If EventType() = #PB_EventType_LeftDoubleClick
@@ -1878,10 +2635,9 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
               EndIf
             EndIf
             
-            
             If EventType() = #PB_EventType_RightClick
-              MessageRequester("LGBTScript IDE v9.0", "Текст скопирован в буфер обмена")
-           SetClipboardText(GetGadgetItemText(#GAD_LOG, GetGadgetState(#GAD_LOG)))
+              SetClipboardText(GetGadgetItemText(#GAD_LOG, GetGadgetState(#GAD_LOG)))
+              Status("Текст скопирован в буфер обмена")
             EndIf
 
         EndSelect
@@ -1897,10 +2653,10 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   If *TextBuf : FreeMemory(*TextBuf) : EndIf
 EndIf
 ; IDE Options = PureBasic 6.21 (Windows - x64)
-; CursorPosition = 1099
-; FirstLine = 1096
-; Folding = --------------
+; CursorPosition = 2295
+; FirstLine = 2292
+; Folding = ----------------
 ; EnableXP
 ; DPIAware
 ; UseIcon = ico.ico
-; Executable = LGBTScript IDE.exe
+; Executable = ..\LGBTScript VII\LGBTScript IDE.exe

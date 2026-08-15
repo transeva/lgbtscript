@@ -180,7 +180,7 @@ func NewLexer(input string) *Lexer {
 			"help": true, "orientation": true,
 			"rainbow": true,
 			"return": true,
-			"try": true, "catch": true,
+			"hetero": true, "homo": true,
 			"export": true,
 			"pride": true,
 			"sex": true,
@@ -639,10 +639,10 @@ type IncludeStatement struct {
 	Filename string
 }
 
-type TryCatchStatement struct {
+type HeteroHomoStatement struct {
 	BaseNode
-	TryBlock   []Node
-	CatchBlock []Node
+	HeteroBlock []Node
+	HomoBlock   []Node
 }
 
 type ExpressionStatement struct {
@@ -1053,8 +1053,8 @@ func (p *Parser) parseStatement() (Node, error) {
 			return p.parseFunctionDeclaration()
 		case "return":
 			return p.parseReturnStatement()
-		case "try":
-			return p.parseTryCatchStatement()
+		case "hetero":
+			return p.parseHeteroHomoStatement()
 		case "export":
 			return p.parseExportStatement()
 		case "asexual":
@@ -1542,32 +1542,31 @@ func (p *Parser) parseReturnStatement() (Node, error) {
 		Value:    value,
 	}, nil
 }
-
-func (p *Parser) parseTryCatchStatement() (Node, error) {
+func (p *Parser) parseHeteroHomoStatement() (Node, error) {
 	token := p.peek()
 	line := token.Line
 	col := token.Col
-	p.next()
+	p.next() // пропускаем "hetero"
 
 	_, err := p.expect(TOKEN_OPERATOR, "{")
 	if err != nil {
 		return nil, err
 	}
 
-	var tryBlock []Node
+	var heteroBlock []Node
 	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return nil, err
 		}
-		tryBlock = append(tryBlock, stmt)
+		heteroBlock = append(heteroBlock, stmt)
 	}
 	_, err = p.expect(TOKEN_OPERATOR, "}")
 	if err != nil {
 		return nil, err
 	}
 
-	_, err = p.expect(TOKEN_KEYWORD, "catch")
+	_, err = p.expect(TOKEN_KEYWORD, "homo")
 	if err != nil {
 		return nil, err
 	}
@@ -1577,26 +1576,25 @@ func (p *Parser) parseTryCatchStatement() (Node, error) {
 		return nil, err
 	}
 
-	var catchBlock []Node
+	var homoBlock []Node
 	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return nil, err
 		}
-		catchBlock = append(catchBlock, stmt)
+		homoBlock = append(homoBlock, stmt)
 	}
 	_, err = p.expect(TOKEN_OPERATOR, "}")
 	if err != nil {
 		return nil, err
 	}
 
-	return &TryCatchStatement{
-		BaseNode:   BaseNode{Line: line, Col: col},
-		TryBlock:   tryBlock,
-		CatchBlock: catchBlock,
+	return &HeteroHomoStatement{
+		BaseNode:    BaseNode{Line: line, Col: col},
+		HeteroBlock: heteroBlock,
+		HomoBlock:   homoBlock,
 	}, nil
 }
-
 func (p *Parser) parseExportStatement() (Node, error) {
 	token := p.peek()
 	line := token.Line
@@ -2949,27 +2947,27 @@ func (i *Interpreter) evaluateNode(node Node) (TypedValue, error) {
 		i.returnValue = value
 		i.returnFlag = true
 		return value, nil
-	case *TryCatchStatement:
-		var err error
-		for _, stmt := range n.TryBlock {
-			_, err = i.evaluateNode(stmt)
-			if err != nil {
-				break
-			}
-		}
+	case *HeteroHomoStatement:
+    var err error
+    for _, stmt := range n.HeteroBlock {
+        _, err = i.evaluateNode(stmt)
+        if err != nil {
+            break
+        }
+    }
 
-		if err != nil {
-			i.setVar("error", NewTypedString(err.Error()))
-			i.setType("error", "lesbian")
-			for _, stmt := range n.CatchBlock {
-				_, catchErr := i.evaluateNode(stmt)
-				if catchErr != nil {
-					return TypedValue{}, catchErr
-				}
-			}
-			return TypedValue{Type: TypeNull, Value: nil}, nil
-		}
-		return TypedValue{Type: TypeNull, Value: nil}, nil
+    if err != nil {
+        i.setVar("error", NewTypedString(err.Error()))
+        i.setType("error", "lesbian")
+        for _, stmt := range n.HomoBlock {
+            _, catchErr := i.evaluateNode(stmt)
+            if catchErr != nil {
+                return TypedValue{}, catchErr
+            }
+        }
+        return TypedValue{Type: TypeNull, Value: nil}, nil
+    }
+    return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *ExpressionStatement:
 		val, err := i.evaluateNode(n.Expr)
 		if err != nil {

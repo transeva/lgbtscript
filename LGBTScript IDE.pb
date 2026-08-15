@@ -2653,8 +2653,8 @@ If OpenWindow(0, 0, 0, 1200, 480, "LGBTScript IDE v9.0",
   If *TextBuf : FreeMemory(*TextBuf) : EndIf
 EndIf
 ; IDE Options = PureBasic 6.21 (Windows - x64)
-; CursorPosition = 2313
-; FirstLine = 2292
+; CursorPosition = 359
+; FirstLine = 345
 ; Folding = ----------------
 ; EnableXP
 ; DPIAware

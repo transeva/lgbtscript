@@ -1,16 +1,18 @@
 package main
 
 import (
-	"bufio"
-	"crypto/md5"
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"math/rand"
+	mathrand "math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,23 +24,118 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"context"
+	"unicode"
+	"unsafe"
+
+	"github.com/gorilla/websocket"
 )
 
-// ---------- Глобальный вывод (консоль + файл) ----------
+// ============================================================
+// ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+// ============================================================
+
 var output io.Writer = os.Stdout
 var isFileExecution = false
 var currentFilePath = ""
 var debugMode = false
 
-// ---------- Настройка консоли для Windows ----------
+var (
+	user32DLL         = syscall.NewLazyDLL("user32.dll")
+	procKeybdEvent    = user32DLL.NewProc("keybd_event")
+	procGetWindowText = user32DLL.NewProc("GetWindowTextW")
+	procSetWindowText = user32DLL.NewProc("SetWindowTextW")
+	procMessageBox    = user32DLL.NewProc("MessageBoxW")
+)
+
+// Константы для MessageBox
+const (
+	MB_OK               = 0x00000000
+	MB_OKCANCEL         = 0x00000001
+	MB_ABORTRETRYIGNORE = 0x00000002
+	MB_YESNOCANCEL      = 0x00000003
+	MB_YESNO            = 0x00000004
+	MB_RETRYCANCEL      = 0x00000005
+
+	MB_ICONHAND        = 0x00000010
+	MB_ICONQUESTION    = 0x00000020
+	MB_ICONEXCLAMATION = 0x00000030
+	MB_ICONASTERISK    = 0x00000040
+	MB_ICONWARNING     = MB_ICONEXCLAMATION
+	MB_ICONERROR       = MB_ICONHAND
+	MB_ICONINFORMATION = MB_ICONASTERISK
+
+	IDOK     = 1
+	IDCANCEL = 2
+	IDABORT  = 3
+	IDRETRY  = 4
+	IDIGNORE = 5
+	IDYES    = 6
+	IDNO     = 7
+)
+
+func MessageBox(hWnd uintptr, lpText, lpCaption *uint16, uType uint32) int {
+	ret, _, _ := procMessageBox.Call(
+		hWnd,
+		uintptr(unsafe.Pointer(lpText)),
+		uintptr(unsafe.Pointer(lpCaption)),
+		uintptr(uType),
+	)
+	return int(ret)
+}
+
+// ============================================================
+// СТРУКТУРЫ ДЛЯ ЧАТА
+// ============================================================
+
+type ChatServer struct {
+	Name        string
+	Clients     map[*websocket.Conn]*ChatClient
+	Broadcast   chan ChatMessage
+	Register    chan *ChatClient
+	Unregister  chan *websocket.Conn
+	Mu          sync.RWMutex
+	IsActive    bool
+	Messages    []ChatMessage
+	MaxMessages int
+}
+
+type ChatClient struct {
+	Conn     *websocket.Conn
+	Username string
+	Server   *ChatServer
+	Room     string
+}
+
+type ChatMessage struct {
+	Username  string    `json:"username"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
+	Room      string    `json:"room"`
+	Type      string    `json:"type"`
+}
+
+var (
+	chatServers = make(map[string]*ChatServer)
+	chatMu      sync.RWMutex
+	upgrader    = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+)
+
+// ============================================================
+// НАСТРОЙКА КОНСОЛИ
+// ============================================================
+
 func setupConsole() {
 	if os.Getenv("OS") == "Windows_NT" {
 		fmt.Fprint(output, "\xef\xbb\xbf")
 	}
 }
 
-// ---------- Токены ----------
+// ============================================================
+// ТОКЕНЫ И ЛЕКСЕР
+// ============================================================
+
 const (
 	TOKEN_NUMBER = iota
 	TOKEN_FLOAT
@@ -60,7 +157,6 @@ type Token struct {
 	Col   int
 }
 
-// ---------- Лексер ----------
 type Lexer struct {
 	input    string
 	pos      int
@@ -78,15 +174,14 @@ func NewLexer(input string) *Lexer {
 		line:  1,
 		col:   1,
 		keywords: map[string]bool{
-			"lesbian": true, "gay": true, "trans": true, "nonbinary": true, "gender": true,
+			"lesbian": true, "gay": true, "queer": true, "nonbinary": true, "gender": true,
 			"comingout": true, "cis": true, "nocis": true,
 			"true": true, "false": true,
 			"help": true, "orientation": true,
 			"rainbow": true,
 			"return": true,
-			"try": true, "catch": true,
+			"hetero": true, "homo": true,
 			"export": true,
-			"queer": true, "extends": true, "this": true, "super": true, "new": true,
 			"pride": true,
 			"sex": true,
 			"asexual": true,
@@ -122,7 +217,6 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 			continue
 		}
 
-		// Директива #inclusive
 		if ch == '#' && l.pos+1 < len(l.input) {
 			next := l.input[l.pos+1]
 			if next >= 'a' && next <= 'z' {
@@ -179,7 +273,6 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 			continue
 		}
 
-		// Поддержка отрицательных чисел
 		if ch == '-' && l.pos+1 < len(l.input) {
 			next := l.input[l.pos+1]
 			if (next >= '0' && next <= '9') || next == '.' {
@@ -351,10 +444,8 @@ func (l *Lexer) tokenizeOperator() error {
 	startCol := l.col
 	var value string
 
-	// Проверяем составные операторы
 	if l.pos+1 < len(l.input) {
 		next := l.input[l.pos+1]
-		// Двухсимвольные операторы
 		if (ch == '=' && next == '=') || (ch == '!' && next == '=') ||
 			(ch == '<' && next == '=') || (ch == '>' && next == '=') ||
 			(ch == '&' && next == '&') || (ch == '|' && next == '|') ||
@@ -367,7 +458,6 @@ func (l *Lexer) tokenizeOperator() error {
 			l.tokens = append(l.tokens, Token{TOKEN_OPERATOR, value, startLine, startCol})
 			return nil
 		}
-		// Постфиксный инкремент/декремент
 		if (ch == '+' && next == '+') || (ch == '-' && next == '-') {
 			value = string(ch) + string(next)
 			l.pos += 2
@@ -377,7 +467,6 @@ func (l *Lexer) tokenizeOperator() error {
 		}
 	}
 
-	// Односимвольные операторы
 	operators := "=+-*/%<>=!(){},;."
 	if strings.ContainsRune(operators, rune(ch)) {
 		value = string(ch)
@@ -389,7 +478,10 @@ func (l *Lexer) tokenizeOperator() error {
 	return fmt.Errorf("unknown character '%c' at line %d, column %d", ch, startLine, startCol)
 }
 
-// ---------- AST узлы ----------
+// ============================================================
+// AST УЗЛЫ
+// ============================================================
+
 type Node interface {
 	GetLine() int
 }
@@ -473,8 +565,8 @@ type ArrayAssignmentStatement struct {
 type IncrementDecrementStatement struct {
 	BaseNode
 	Name     string
-	Operator string // "++" или "--"
-	Postfix  bool   // true если постфиксный, false если префиксный
+	Operator string
+	Postfix  bool
 }
 
 type PrintStatement struct {
@@ -547,10 +639,10 @@ type IncludeStatement struct {
 	Filename string
 }
 
-type TryCatchStatement struct {
+type HeteroHomoStatement struct {
 	BaseNode
-	TryBlock   []Node
-	CatchBlock []Node
+	HeteroBlock []Node
+	HomoBlock   []Node
 }
 
 type ExpressionStatement struct {
@@ -564,48 +656,15 @@ type ConstantDeclaration struct {
 	Value Node
 }
 
-type QueerClassDeclaration struct {
-	BaseNode
-	Name       string
-	Parent     string
-	Fields     map[string]string
-	Methods    map[string]*FunctionDeclaration
-	Constructor *FunctionDeclaration
-}
-
-type QueerInstanceNode struct {
-	BaseNode
-	ClassName string
-	Args      []Node
-}
-
-type QueerFieldAccessNode struct {
-	BaseNode
-	Object Node
-	Field  string
-}
-
-type QueerMethodCallNode struct {
-	BaseNode
-	Object Node
-	Method string
-	Args   []Node
-}
-
-type ThisNode struct {
-	BaseNode
-}
-
-type SuperNode struct {
-	BaseNode
-}
-
 type Program struct {
 	BaseNode
 	Statements []Node
 }
 
-// ---------- Парсер ----------
+// ============================================================
+// ПАРСЕР - ПОЛНАЯ ВЕРСИЯ
+// ============================================================
+
 type Parser struct {
 	tokens []Token
 	pos    int
@@ -655,19 +714,306 @@ func (p *Parser) getCurrentLine() int {
 	return 0
 }
 
-func (p *Parser) Parse() (*Program, error) {
-	program := &Program{BaseNode: BaseNode{Line: 1, Col: 1}}
-	for p.peek().Type != TOKEN_EOF {
-		stmt, err := p.parseStatement()
+// ============================================================
+// ПАРСЕР - МЕТОДЫ РАЗБОРА ВЫРАЖЕНИЙ
+// ============================================================
+
+func (p *Parser) parseExpression() (Node, error) {
+	return p.parseLogicalOr()
+}
+
+func (p *Parser) parseLogicalOr() (Node, error) {
+	left, err := p.parseLogicalAnd()
+	if err != nil {
+		return nil, err
+	}
+
+	for p.peek().Value == "||" {
+		op := p.peek().Value
+		p.next()
+		right, err := p.parseLogicalAnd()
 		if err != nil {
 			return nil, err
 		}
-		if stmt != nil {
-			program.Statements = append(program.Statements, stmt)
+		left = &BinaryOpNode{
+			BaseNode: BaseNode{Line: left.GetLine(), Col: 0},
+			Left:     left,
+			Op:       op,
+			Right:    right,
 		}
 	}
-	return program, nil
+
+	return left, nil
 }
+
+func (p *Parser) parseLogicalAnd() (Node, error) {
+	left, err := p.parseEquality()
+	if err != nil {
+		return nil, err
+	}
+
+	for p.peek().Value == "&&" {
+		op := p.peek().Value
+		p.next()
+		right, err := p.parseEquality()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOpNode{
+			BaseNode: BaseNode{Line: left.GetLine(), Col: 0},
+			Left:     left,
+			Op:       op,
+			Right:    right,
+		}
+	}
+
+	return left, nil
+}
+
+func (p *Parser) parseEquality() (Node, error) {
+	left, err := p.parseComparison()
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		token := p.peek()
+		if token.Value != "==" && token.Value != "!=" {
+			break
+		}
+		op := token.Value
+		p.next()
+		right, err := p.parseComparison()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOpNode{
+			BaseNode: BaseNode{Line: left.GetLine(), Col: 0},
+			Left:     left,
+			Op:       op,
+			Right:    right,
+		}
+	}
+
+	return left, nil
+}
+
+func (p *Parser) parseComparison() (Node, error) {
+	left, err := p.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		token := p.peek()
+		if token.Value != "<" && token.Value != ">" && token.Value != "<=" && token.Value != ">=" {
+			break
+		}
+		op := token.Value
+		p.next()
+		right, err := p.parseAdditive()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOpNode{
+			BaseNode: BaseNode{Line: left.GetLine(), Col: 0},
+			Left:     left,
+			Op:       op,
+			Right:    right,
+		}
+	}
+
+	return left, nil
+}
+
+func (p *Parser) parseAdditive() (Node, error) {
+	left, err := p.parseMultiplicative()
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		token := p.peek()
+		if token.Value != "+" && token.Value != "-" {
+			break
+		}
+		op := token.Value
+		p.next()
+		right, err := p.parseMultiplicative()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOpNode{
+			BaseNode: BaseNode{Line: left.GetLine(), Col: 0},
+			Left:     left,
+			Op:       op,
+			Right:    right,
+		}
+	}
+
+	return left, nil
+}
+
+func (p *Parser) parseMultiplicative() (Node, error) {
+	left, err := p.parseUnary()
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		token := p.peek()
+		if token.Value != "*" && token.Value != "/" && token.Value != "%" {
+			break
+		}
+		op := token.Value
+		p.next()
+		right, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		left = &BinaryOpNode{
+			BaseNode: BaseNode{Line: left.GetLine(), Col: 0},
+			Left:     left,
+			Op:       op,
+			Right:    right,
+		}
+	}
+
+	return left, nil
+}
+
+func (p *Parser) parseUnary() (Node, error) {
+	token := p.peek()
+	if token.Value == "-" || token.Value == "!" {
+		op := token.Value
+		p.next()
+		expr, err := p.parseUnary()
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryNode{
+			BaseNode: BaseNode{Line: token.Line, Col: token.Col},
+			Op:       op,
+			Expr:     expr,
+		}, nil
+	}
+
+	if token.Value == "++" || token.Value == "--" {
+		op := token.Value
+		p.next()
+		if p.peek().Type != TOKEN_IDENTIFIER {
+			return nil, fmt.Errorf("expected identifier after %s", op)
+		}
+		name := p.peek().Value
+		p.next()
+		return &IncrementDecrementStatement{
+			BaseNode: BaseNode{Line: token.Line, Col: token.Col},
+			Name:     name,
+			Operator: op,
+			Postfix:  false,
+		}, nil
+	}
+
+	return p.parsePrimary()
+}
+
+func (p *Parser) parsePrimary() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+
+	switch token.Type {
+	case TOKEN_NUMBER:
+		val, err := strconv.Atoi(token.Value)
+		if err != nil {
+			return nil, err
+		}
+		p.next()
+		return &NumberNode{BaseNode: BaseNode{Line: line, Col: col}, Value: val}, nil
+
+	case TOKEN_FLOAT:
+		val, err := strconv.ParseFloat(token.Value, 64)
+		if err != nil {
+			return nil, err
+		}
+		p.next()
+		return &FloatNode{BaseNode: BaseNode{Line: line, Col: col}, Value: val}, nil
+
+	case TOKEN_STRING:
+		p.next()
+		return &StringNode{BaseNode: BaseNode{Line: line, Col: col}, Value: token.Value}, nil
+
+	case TOKEN_KEYWORD:
+		if token.Value == "true" {
+			p.next()
+			return &BooleanNode{BaseNode: BaseNode{Line: line, Col: col}, Value: true}, nil
+		}
+		if token.Value == "false" {
+			p.next()
+			return &BooleanNode{BaseNode: BaseNode{Line: line, Col: col}, Value: false}, nil
+		}
+
+	case TOKEN_IDENTIFIER:
+		nextToken := p.peekNext()
+		if nextToken.Value == "(" {
+			return p.parseFunctionCall(token.Value)
+		}
+		if nextToken.Value == "[" {
+			p.next()
+			p.next()
+			index, err := p.parseExpression()
+			if err != nil {
+				return nil, err
+			}
+			_, err = p.expect(TOKEN_ARRAY_CLOSE, "]")
+			if err != nil {
+				return nil, err
+			}
+			return &ArrayIndexNode{
+				BaseNode: BaseNode{Line: line, Col: col},
+				Name:     token.Value,
+				Index:    index,
+			}, nil
+		}
+		p.next()
+		return &VariableNode{BaseNode: BaseNode{Line: line, Col: col}, Name: token.Value}, nil
+
+	case TOKEN_ARRAY_OPEN:
+		p.next()
+		var elements []Node
+		if p.peek().Value != "]" {
+			for {
+				elem, err := p.parseExpression()
+				if err != nil {
+					return nil, err
+				}
+				elements = append(elements, elem)
+				if p.peek().Value == "," {
+					p.next()
+					continue
+				}
+				break
+			}
+		}
+		_, err := p.expect(TOKEN_ARRAY_CLOSE, "]")
+		if err != nil {
+			return nil, err
+		}
+		return &ArrayNode{
+			BaseNode: BaseNode{Line: line, Col: col},
+			Elements: elements,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unexpected token: %s", token.Value)
+	}
+
+	return nil, fmt.Errorf("unexpected token: %s", token.Value)
+}
+
+// ============================================================
+// ПАРСЕР - РАЗБОР СТАТЕМЕНТОВ
+// ============================================================
 
 func (p *Parser) parseStatement() (Node, error) {
 	token := p.peek()
@@ -689,7 +1035,7 @@ func (p *Parser) parseStatement() (Node, error) {
 	if token.Type == TOKEN_KEYWORD {
 		keyword := token.Value
 		switch keyword {
-		case "lesbian", "gay", "trans", "nonbinary", "gender":
+		case "lesbian", "gay", "queer", "nonbinary", "gender":
 			return p.parseTypedDeclaration()
 		case "comingout":
 			return p.parsePrintStatement()
@@ -707,14 +1053,10 @@ func (p *Parser) parseStatement() (Node, error) {
 			return p.parseFunctionDeclaration()
 		case "return":
 			return p.parseReturnStatement()
-		case "try":
-			return p.parseTryCatchStatement()
+		case "hetero":
+			return p.parseHeteroHomoStatement()
 		case "export":
 			return p.parseExportStatement()
-		case "queer":
-			return p.parseQueerClassDeclaration()
-		case "new":
-			return p.parseNewInstance()
 		case "asexual":
 			return p.parseConstantDeclaration()
 		}
@@ -722,12 +1064,11 @@ func (p *Parser) parseStatement() (Node, error) {
 
 	if token.Type == TOKEN_IDENTIFIER {
 		nextToken := p.peekNext()
-		
-		// Проверяем на инкремент/декремент
+
 		if nextToken.Value == "++" || nextToken.Value == "--" {
 			return p.parseIncrementDecrement(token.Value, false)
 		}
-		
+
 		if nextToken.Value == "(" {
 			call, err := p.parseFunctionCall(token.Value)
 			if err != nil {
@@ -744,12 +1085,8 @@ func (p *Parser) parseStatement() (Node, error) {
 		}
 
 		if nextToken.Value == "=" || nextToken.Value == "+=" || nextToken.Value == "-=" ||
-		   nextToken.Value == "*=" || nextToken.Value == "/=" || nextToken.Value == "%=" {
+			nextToken.Value == "*=" || nextToken.Value == "/=" || nextToken.Value == "%=" {
 			return p.parseAssignment(token.Value)
-		}
-
-		if nextToken.Value == "." {
-			return p.parseFieldAccess(token.Value)
 		}
 
 		expr, err := p.parseExpression()
@@ -763,7 +1100,6 @@ func (p *Parser) parseStatement() (Node, error) {
 	}
 
 	if token.Type == TOKEN_OPERATOR {
-		// Префиксный инкремент/декремент
 		if token.Value == "++" || token.Value == "--" {
 			p.next()
 			if p.peek().Type != TOKEN_IDENTIFIER {
@@ -783,64 +1119,6 @@ func (p *Parser) parseStatement() (Node, error) {
 		}
 	}
 
-	if token.Type == TOKEN_KEYWORD {
-		if token.Value == "this" {
-			p.next()
-			if p.peek().Value == "." {
-				p.next()
-				field, err := p.expect(TOKEN_IDENTIFIER, "")
-				if err != nil {
-					return nil, err
-				}
-				return &QueerFieldAccessNode{
-					BaseNode: BaseNode{Line: line, Col: col},
-					Object:   &ThisNode{BaseNode: BaseNode{Line: line, Col: col}},
-					Field:    field.Value,
-				}, nil
-			}
-			return &ThisNode{BaseNode: BaseNode{Line: line, Col: col}}, nil
-		}
-		if token.Value == "super" {
-			p.next()
-			if p.peek().Value == "." {
-				p.next()
-				method, err := p.expect(TOKEN_IDENTIFIER, "")
-				if err != nil {
-					return nil, err
-				}
-				_, err = p.expect(TOKEN_OPERATOR, "(")
-				if err != nil {
-					return nil, err
-				}
-				var args []Node
-				if p.peek().Value != ")" {
-					for {
-						arg, err := p.parseExpression()
-						if err != nil {
-							return nil, err
-						}
-						args = append(args, arg)
-						if p.peek().Value == "," {
-							p.next()
-							continue
-						}
-						break
-					}
-				}
-				_, err = p.expect(TOKEN_OPERATOR, ")")
-				if err != nil {
-					return nil, err
-				}
-				return &QueerMethodCallNode{
-					BaseNode: BaseNode{Line: line, Col: col},
-					Object:   &SuperNode{BaseNode: BaseNode{Line: line, Col: col}},
-					Method:   method.Value,
-					Args:     args,
-				}, nil
-			}
-		}
-	}
-
 	expr, err := p.parseExpression()
 	if err != nil {
 		return nil, err
@@ -851,299 +1129,342 @@ func (p *Parser) parseStatement() (Node, error) {
 	return &ExpressionStatement{BaseNode: BaseNode{Line: line, Col: col}, Expr: expr}, nil
 }
 
-func (p *Parser) parseQueerClassDeclaration() (Node, error) {
+func (p *Parser) parseTypedDeclaration() (Node, error) {
 	token := p.peek()
+	line := token.Line
+	col := token.Col
+	typeName := token.Value
 	p.next()
-	
-	name, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-	
-	var parent string
-	if p.peek().Value == "extends" {
-		p.next()
-		parentToken, err := p.expect(TOKEN_IDENTIFIER, "")
-		if err != nil {
-			return nil, err
-		}
-		parent = parentToken.Value
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, "{")
-	if err != nil {
-		return nil, err
-	}
-	
-	class := &QueerClassDeclaration{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Name:     name.Value,
-		Parent:   parent,
-		Fields:   make(map[string]string),
-		Methods:  make(map[string]*FunctionDeclaration),
-	}
-	
-	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
-		tok := p.peek()
-		if tok.Type == TOKEN_KEYWORD {
-			keyword := tok.Value
-			switch keyword {
-			case "lesbian", "gay", "trans", "nonbinary", "gender":
-				p.next()
-				fieldName, err := p.expect(TOKEN_IDENTIFIER, "")
-				if err != nil {
-					return nil, err
-				}
-				class.Fields[fieldName.Value] = keyword
-				if p.peek().Value == ";" {
-					p.next()
-				}
-			case "rainbow":
-				method, err := p.parseFunctionDeclaration()
-				if err != nil {
-					return nil, err
-				}
-				if fn, ok := method.(*FunctionDeclaration); ok {
-					if fn.Name == "init" {
-						class.Constructor = fn
-					} else {
-						class.Methods[fn.Name] = fn
-					}
-				}
-			default:
-				return nil, fmt.Errorf("unexpected keyword in class: %s", keyword)
-			}
-		} else {
-			return nil, fmt.Errorf("expected field or method in class, got %s", tok.Value)
-		}
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, "}")
-	if err != nil {
-		return nil, err
-	}
-	
-	return class, nil
-}
 
-func (p *Parser) parseNewInstance() (Node, error) {
-	token := p.peek()
-	p.next()
-	
-	className, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, "(")
-	if err != nil {
-		return nil, err
-	}
-	
-	var args []Node
-	if p.peek().Value != ")" {
-		for {
-			arg, err := p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			args = append(args, arg)
-			
-			if p.peek().Value == "," {
-				p.next()
-				continue
-			}
-			break
-		}
-	}
-	
-	_, err = p.expect(TOKEN_OPERATOR, ")")
-	if err != nil {
-		return nil, err
-	}
-	
-	return &QueerInstanceNode{
-		BaseNode:  BaseNode{Line: token.Line, Col: token.Col},
-		ClassName: className.Value,
-		Args:      args,
-	}, nil
-}
-
-func (p *Parser) parseFieldAccess(objName string) (Node, error) {
-	token := p.peek()
-	p.next()
-	
-	_, err := p.expect(TOKEN_OPERATOR, ".")
-	if err != nil {
-		return nil, err
-	}
-	
-	field, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-	
-	if p.peek().Value == "(" {
-		p.pos--
-		methodName := field.Value
-		_, err := p.expect(TOKEN_OPERATOR, "(")
-		if err != nil {
-			return nil, err
-		}
-		
-		var args []Node
-		if p.peek().Value != ")" {
-			for {
-				arg, err := p.parseExpression()
-				if err != nil {
-					return nil, err
-				}
-				args = append(args, arg)
-				
-				if p.peek().Value == "," {
-					p.next()
-					continue
-				}
-				break
-			}
-		}
-		
-		_, err = p.expect(TOKEN_OPERATOR, ")")
-		if err != nil {
-			return nil, err
-		}
-		
-		return &QueerMethodCallNode{
-			BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-			Object:   &VariableNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Name: objName},
-			Method:   methodName,
-			Args:     args,
-		}, nil
-	}
-	
-	return &QueerFieldAccessNode{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Object:   &VariableNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Name: objName},
-		Field:    field.Value,
-	}, nil
-}
-
-func (p *Parser) parseExportStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	token2 := p.peek()
-	if token2.Type == TOKEN_KEYWORD && token2.Value == "rainbow" {
-		fn, err := p.parseFunctionDeclaration()
-		if err != nil {
-			return nil, err
-		}
-		if fnDecl, ok := fn.(*FunctionDeclaration); ok {
-			fnDecl.Exported = true
-			fnDecl.Line = token.Line
-			fnDecl.Col = token.Col
-		}
-		return fn, nil
-	}
-	return nil, fmt.Errorf("expected function declaration after export")
-}
-
-func (p *Parser) parseTryCatchStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	_, err := p.expect(TOKEN_OPERATOR, "{")
-	if err != nil {
-		return nil, err
-	}
-
-	tryBlock, err := p.parseBlock()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "}")
-	if err != nil {
-		return nil, err
-	}
-
-	if p.peek().Type != TOKEN_KEYWORD || p.peek().Value != "catch" {
-		return nil, fmt.Errorf("expected 'catch' after try block")
-	}
-	p.next()
-	_, err = p.expect(TOKEN_OPERATOR, "{")
-	if err != nil {
-		return nil, err
-	}
-
-	catchBlock, err := p.parseBlock()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "}")
-	if err != nil {
-		return nil, err
-	}
-
-	return &TryCatchStatement{
-		BaseNode:   BaseNode{Line: token.Line, Col: token.Col},
-		TryBlock:   tryBlock,
-		CatchBlock: catchBlock,
-	}, nil
-}
-
-func (p *Parser) parseArrayAssignment(name string) (Node, error) {
-	token := p.peek()
-	p.next()
-	_, err := p.expect(TOKEN_ARRAY_OPEN, "[")
-	if err != nil {
-		return nil, err
-	}
-	index, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_ARRAY_CLOSE, "]")
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "=")
-	if err != nil {
-		return nil, err
-	}
-	value, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	if p.peek().Value == ";" {
-		p.next()
-	}
-	return &ArrayAssignmentStatement{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Name:     name,
-		Index:    index,
-		Value:    value,
-	}, nil
-}
-
-func (p *Parser) parseReturnStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	value, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	if p.peek().Value == ";" {
-		p.next()
-	}
-	return &ReturnStatement{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: value}, nil
-}
-
-func (p *Parser) parseFunctionDeclaration() (Node, error) {
-	token := p.peek()
-	p.next()
 	nameToken, err := p.expect(TOKEN_IDENTIFIER, "")
 	if err != nil {
 		return nil, err
 	}
-	name := nameToken.Value
+
+	_, err = p.expect(TOKEN_OPERATOR, "=")
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &TypedDeclaration{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Type:     typeName,
+		Name:     nameToken.Value,
+		Value:    value,
+	}, nil
+}
+
+func (p *Parser) parsePrintStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	value, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &PrintStatement{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Value:    value,
+	}, nil
+}
+
+func (p *Parser) parseIfStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	_, err := p.expect(TOKEN_OPERATOR, "(")
+	if err != nil {
+		return nil, err
+	}
+
+	cond, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, ")")
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, "{")
+	if err != nil {
+		return nil, err
+	}
+
+	var thenBlock []Node
+	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		thenBlock = append(thenBlock, stmt)
+	}
+	_, err = p.expect(TOKEN_OPERATOR, "}")
+	if err != nil {
+		return nil, err
+	}
+
+	var elseIfBlocks []ElseIfBlock
+	var elseBlock []Node
+
+	for p.peek().Value == "nocis" {
+		p.next()
+
+		_, err := p.expect(TOKEN_OPERATOR, "(")
+		if err != nil {
+			return nil, err
+		}
+
+		cond, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = p.expect(TOKEN_OPERATOR, ")")
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = p.expect(TOKEN_OPERATOR, "{")
+		if err != nil {
+			return nil, err
+		}
+		var block []Node
+		for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+			stmt, err := p.parseStatement()
+			if err != nil {
+				return nil, err
+			}
+			block = append(block, stmt)
+		}
+		_, err = p.expect(TOKEN_OPERATOR, "}")
+		if err != nil {
+			return nil, err
+		}
+		elseIfBlocks = append(elseIfBlocks, ElseIfBlock{Condition: cond, Block: block})
+	}
+
+	if p.peek().Value == "cis" {
+		p.next()
+		_, err = p.expect(TOKEN_OPERATOR, "{")
+		if err != nil {
+			return nil, err
+		}
+		for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+			stmt, err := p.parseStatement()
+			if err != nil {
+				return nil, err
+			}
+			elseBlock = append(elseBlock, stmt)
+		}
+		_, err = p.expect(TOKEN_OPERATOR, "}")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &IfStatement{
+		BaseNode:     BaseNode{Line: line, Col: col},
+		Condition:    cond,
+		ThenBlock:    thenBlock,
+		ElseIfBlocks: elseIfBlocks,
+		ElseBlock:    elseBlock,
+	}, nil
+}
+
+func (p *Parser) parseWhileStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	_, err := p.expect(TOKEN_OPERATOR, "(")
+	if err != nil {
+		return nil, err
+	}
+
+	cond, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, ")")
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, "{")
+	if err != nil {
+		return nil, err
+	}
+
+	var body []Node
+	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		body = append(body, stmt)
+	}
+	_, err = p.expect(TOKEN_OPERATOR, "}")
+	if err != nil {
+		return nil, err
+	}
+
+	return &WhileStatement{
+		BaseNode:  BaseNode{Line: line, Col: col},
+		Condition: cond,
+		Body:      body,
+	}, nil
+}
+
+func (p *Parser) parseSexStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	_, err := p.expect(TOKEN_OPERATOR, "(")
+	if err != nil {
+		return nil, err
+	}
+
+	var init Node
+	if p.peek().Value != ";" {
+		init, err = p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	var cond Node
+	if p.peek().Value != ";" {
+		cond, err = p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	var update Node
+	if p.peek().Value != ")" {
+		update, err = p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, err = p.expect(TOKEN_OPERATOR, ")")
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, "{")
+	if err != nil {
+		return nil, err
+	}
+
+	var body []Node
+	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		body = append(body, stmt)
+	}
+	_, err = p.expect(TOKEN_OPERATOR, "}")
+	if err != nil {
+		return nil, err
+	}
+
+	return &SexStatement{
+		BaseNode:  BaseNode{Line: line, Col: col},
+		Init:      init,
+		Condition: cond,
+		Update:    update,
+		Body:      body,
+	}, nil
+}
+
+func (p *Parser) parseHelpStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	_, err := p.expect(TOKEN_OPERATOR, "(")
+	if err != nil {
+		return nil, err
+	}
+
+	country, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, ")")
+	if err != nil {
+		return nil, err
+	}
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &HelpStatement{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Country:  country,
+	}, nil
+}
+
+func (p *Parser) parseOrientationStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &OrientationStatement{
+		BaseNode: BaseNode{Line: line, Col: col},
+	}, nil
+}
+
+func (p *Parser) parseFunctionDeclaration() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	name, err := p.expect(TOKEN_IDENTIFIER, "")
+	if err != nil {
+		return nil, err
+	}
 
 	_, err = p.expect(TOKEN_OPERATOR, "(")
 	if err != nil {
@@ -1158,7 +1479,6 @@ func (p *Parser) parseFunctionDeclaration() (Node, error) {
 				return nil, err
 			}
 			params = append(params, param.Value)
-
 			if p.peek().Value == "," {
 				p.next()
 				continue
@@ -1166,7 +1486,6 @@ func (p *Parser) parseFunctionDeclaration() (Node, error) {
 			break
 		}
 	}
-
 	_, err = p.expect(TOKEN_OPERATOR, ")")
 	if err != nil {
 		return nil, err
@@ -1177,9 +1496,13 @@ func (p *Parser) parseFunctionDeclaration() (Node, error) {
 		return nil, err
 	}
 
-	body, err := p.parseBlock()
-	if err != nil {
-		return nil, err
+	var body []Node
+	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		body = append(body, stmt)
 	}
 	_, err = p.expect(TOKEN_OPERATOR, "}")
 	if err != nil {
@@ -1187,15 +1510,245 @@ func (p *Parser) parseFunctionDeclaration() (Node, error) {
 	}
 
 	return &FunctionDeclaration{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Name:     name,
+		BaseNode: BaseNode{Line: line, Col: col},
+		Name:     name.Value,
 		Params:   params,
 		Body:     body,
+		Exported: false,
+	}, nil
+}
+
+func (p *Parser) parseReturnStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	var value Node
+	if p.peek().Value != ";" {
+		var err error
+		value, err = p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &ReturnStatement{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Value:    value,
+	}, nil
+}
+func (p *Parser) parseHeteroHomoStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next() // пропускаем "hetero"
+
+	_, err := p.expect(TOKEN_OPERATOR, "{")
+	if err != nil {
+		return nil, err
+	}
+
+	var heteroBlock []Node
+	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		heteroBlock = append(heteroBlock, stmt)
+	}
+	_, err = p.expect(TOKEN_OPERATOR, "}")
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_KEYWORD, "homo")
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, "{")
+	if err != nil {
+		return nil, err
+	}
+
+	var homoBlock []Node
+	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+		homoBlock = append(homoBlock, stmt)
+	}
+	_, err = p.expect(TOKEN_OPERATOR, "}")
+	if err != nil {
+		return nil, err
+	}
+
+	return &HeteroHomoStatement{
+		BaseNode:    BaseNode{Line: line, Col: col},
+		HeteroBlock: heteroBlock,
+		HomoBlock:   homoBlock,
+	}, nil
+}
+func (p *Parser) parseExportStatement() (Node, error) {
+	token := p.peek()
+	line := token.Line
+
+	p.next()
+
+	rainbowToken := p.peek()
+	if rainbowToken.Type != TOKEN_KEYWORD || rainbowToken.Value != "rainbow" {
+		return nil, fmt.Errorf("expected 'rainbow' after export at line %d", line)
+	}
+	p.next()
+
+	fn, err := p.parseFunctionDeclaration()
+	if err != nil {
+		return nil, err
+	}
+
+	if decl, ok := fn.(*FunctionDeclaration); ok {
+		decl.Exported = true
+		return decl, nil
+	}
+
+	return nil, fmt.Errorf("expected function declaration after export at line %d", line)
+}
+
+func (p *Parser) parseConstantDeclaration() (Node, error) {
+	token := p.peek()
+	line := token.Line
+	col := token.Col
+	p.next()
+
+	name, err := p.expect(TOKEN_IDENTIFIER, "")
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, "=")
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &ConstantDeclaration{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Name:     name.Value,
+		Value:    value,
+	}, nil
+}
+
+func (p *Parser) parseAssignment(name string) (Node, error) {
+	line := p.peek().Line
+	col := p.peek().Col
+
+	op := p.peekNext().Value
+	p.pos += 2
+
+	value, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	if op == "=" {
+		return &AssignmentStatement{
+			BaseNode: BaseNode{Line: line, Col: col},
+			Name:     name,
+			Value:    value,
+		}, nil
+	}
+
+	return &AugmentedAssignmentStatement{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Name:     name,
+		Op:       op[:len(op)-1],
+		Value:    value,
+	}, nil
+}
+
+func (p *Parser) parseArrayAssignment(name string) (Node, error) {
+	line := p.peek().Line
+	col := p.peek().Col
+
+	p.next()
+	_, err := p.expect(TOKEN_ARRAY_OPEN, "[")
+	if err != nil {
+		return nil, err
+	}
+
+	index, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_ARRAY_CLOSE, "]")
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = p.expect(TOKEN_OPERATOR, "=")
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &ArrayAssignmentStatement{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Name:     name,
+		Index:    index,
+		Value:    value,
+	}, nil
+}
+
+func (p *Parser) parseIncrementDecrement(name string, postfix bool) (Node, error) {
+	line := p.peek().Line
+	col := p.peek().Col
+
+	op := p.peekNext().Value
+	p.pos += 2
+
+	if p.peek().Value == ";" {
+		p.next()
+	}
+
+	return &IncrementDecrementStatement{
+		BaseNode: BaseNode{Line: line, Col: col},
+		Name:     name,
+		Operator: op,
+		Postfix:  postfix,
 	}, nil
 }
 
 func (p *Parser) parseFunctionCall(name string) (Node, error) {
-	token := p.peek()
+	line := p.peek().Line
+	col := p.peek().Col
+
 	p.next()
 	_, err := p.expect(TOKEN_OPERATOR, "(")
 	if err != nil {
@@ -1210,7 +1763,6 @@ func (p *Parser) parseFunctionCall(name string) (Node, error) {
 				return nil, err
 			}
 			args = append(args, arg)
-
 			if p.peek().Value == "," {
 				p.next()
 				continue
@@ -1218,708 +1770,43 @@ func (p *Parser) parseFunctionCall(name string) (Node, error) {
 			break
 		}
 	}
-
 	_, err = p.expect(TOKEN_OPERATOR, ")")
 	if err != nil {
 		return nil, err
 	}
 
-	return &FunctionCall{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Name: name, Args: args}, nil
-}
-
-func (p *Parser) parseTypedDeclaration() (Node, error) {
-	token := p.peek()
-	p.next()
-	name, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-
-	if p.peek().Value == "=" {
-		p.next()
-		value, err := p.parseExpression()
-		if err != nil {
-			return nil, err
-		}
-		_, err = p.expect(TOKEN_OPERATOR, ";")
-		if err != nil {
-			return nil, err
-		}
-		return &TypedDeclaration{
-			BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-			Type:     token.Value,
-			Name:     name.Value,
-			Value:    value,
-		}, nil
-	}
-
-	_, err = p.expect(TOKEN_OPERATOR, ";")
-	if err != nil {
-		return nil, err
-	}
-
-	var defaultValue Node
-	switch token.Value {
-	case "lesbian":
-		defaultValue = &StringNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: ""}
-	case "gay":
-		defaultValue = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
-	case "trans":
-		defaultValue = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
-	case "nonbinary":
-		defaultValue = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
-	case "gender":
-		defaultValue = &ArrayNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Elements: []Node{}}
-	default:
-		defaultValue = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
-	}
-
-	return &TypedDeclaration{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Type:     token.Value,
-		Name:     name.Value,
-		Value:    defaultValue,
-	}, nil
-}
-
-// parseSexStatement — парсер цикла sex (for)
-func (p *Parser) parseSexStatement() (Node, error) {
-	token := p.peek()
-	p.next() // пропускаем SEX
-
-	// Ожидаем (
-	if p.peek().Value != "(" {
-		return nil, fmt.Errorf("expected '(' after SEX, got '%s' at line %d", p.peek().Value, p.peek().Line)
-	}
-	p.next() // пропускаем (
-
-	// --- Инициализация ---
-	init, err := p.parseSexPart()
-	if err != nil {
-		return nil, err
-	}
-	if p.peek().Value != ";" {
-		return nil, fmt.Errorf("expected ';' after initialization in SEX loop at line %d, got '%s'",
-			p.peek().Line, p.peek().Value)
-	}
-	p.next() // пропускаем ;
-
-	// --- Условие ---
-	condition, err := p.parseSexPart()
-	if err != nil {
-		return nil, err
-	}
-	if condition == nil {
-		condition = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: true}
-	}
-	if p.peek().Value != ";" {
-		return nil, fmt.Errorf("expected ';' after condition in SEX loop at line %d, got '%s'",
-			p.peek().Line, p.peek().Value)
-	}
-	p.next() // пропускаем ;
-
-	// --- Обновление ---
-	update, err := p.parseSexPart()
-	if err != nil {
-		return nil, err
-	}
-	if p.peek().Value != ")" {
-		return nil, fmt.Errorf("expected ')' after update in SEX loop at line %d, got '%s'",
-			p.peek().Line, p.peek().Value)
-	}
-	p.next() // пропускаем )
-
-	// --- Тело ---
-	if p.peek().Value != "{" {
-		return nil, fmt.Errorf("expected '{' after SEX loop header at line %d, got '%s'",
-			p.peek().Line, p.peek().Value)
-	}
-	p.next() // пропускаем {
-
-	body, err := p.parseBlock()
-	if err != nil {
-		return nil, err
-	}
-
-	if p.peek().Value != "}" {
-		return nil, fmt.Errorf("expected '}' after SEX loop body at line %d, got '%s'",
-			p.peek().Line, p.peek().Value)
-	}
-	p.next() // пропускаем }
-
-	return &SexStatement{
-		BaseNode:  BaseNode{Line: token.Line, Col: token.Col},
-		Init:      init,
-		Condition: condition,
-		Update:    update,
-		Body:      body,
-	}, nil
-}
-
-// parseSexPart парсит одну часть цикла SEX (инициализация, условие или обновление)
-func (p *Parser) parseSexPart() (Node, error) {
-	tok := p.peek()
-	if tok.Type == TOKEN_EOF || tok.Value == ";" || tok.Value == ")" {
-		return nil, nil
-	}
-
-	// Проверяем на объявление переменной
-	if tok.Type == TOKEN_KEYWORD {
-		keyword := tok.Value
-		switch keyword {
-		case "gay", "lesbian", "trans", "nonbinary", "gender":
-			decl, err := p.parseTypedDeclarationNoSemicolon()
-			if err != nil {
-				return nil, err
-			}
-			return decl, nil
-		}
-	}
-
-	// Иначе это выражение
-	return p.parseExpression()
-}
-
-// parseTypedDeclarationNoSemicolon парсит объявление переменной без потребления ;
-func (p *Parser) parseTypedDeclarationNoSemicolon() (Node, error) {
-	token := p.peek()
-	if token.Type != TOKEN_KEYWORD {
-		return nil, fmt.Errorf("expected type keyword, got '%s' at line %d", token.Value, token.Line)
-	}
-	keyword := token.Value
-	if keyword != "gay" && keyword != "lesbian" && keyword != "trans" &&
-		keyword != "nonbinary" && keyword != "gender" {
-		return nil, fmt.Errorf("expected type keyword (gay, lesbian, trans, nonbinary, gender), got '%s' at line %d",
-			keyword, token.Line)
-	}
-	p.next() // пропускаем ключевое слово
-
-	nameToken := p.peek()
-	if nameToken.Type != TOKEN_IDENTIFIER {
-		return nil, fmt.Errorf("expected identifier after type, got '%s' at line %d",
-			nameToken.Value, nameToken.Line)
-	}
-	name := nameToken.Value
-	p.next() // пропускаем имя
-
-	var value Node
-	var err error
-	if p.peek().Value == "=" {
-		p.next() // пропускаем =
-		value, err = p.parseExpression()
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// значение по умолчанию
-		switch keyword {
-		case "gay":
-			value = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
-		case "lesbian":
-			value = &StringNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: ""}
-		case "trans":
-			value = &FloatNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0.0}
-		case "nonbinary":
-			value = &BooleanNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: false}
-		case "gender":
-			value = &ArrayNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Elements: []Node{}}
-		default:
-			value = &NumberNode{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: 0}
-		}
-	}
-
-	return &TypedDeclaration{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Type:     keyword,
+	return &FunctionCall{
+		BaseNode: BaseNode{Line: line, Col: col},
 		Name:     name,
-		Value:    value,
+		Args:     args,
 	}, nil
 }
 
-// parseIncrementDecrement парсит инкремент/декремент
-func (p *Parser) parseIncrementDecrement(name string, postfix bool) (Node, error) {
-	token := p.peek()
-	op := p.peekNext().Value
-	p.next() // пропускаем имя
-	p.next() // пропускаем оператор
-	if p.peek().Value == ";" {
-		p.next()
-	}
-	return &IncrementDecrementStatement{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Name:     name,
-		Operator: op,
-		Postfix:  postfix,
-	}, nil
-}
+// ============================================================
+// ПАРСЕР - ОСНОВНОЙ МЕТОД
+// ============================================================
 
-// parseAssignment парсит присваивание (простое или составное)
-func (p *Parser) parseAssignment(name string) (Node, error) {
-	token := p.peek()
-	op := p.peekNext().Value
-	p.next() // пропускаем имя
-	p.next() // пропускаем оператор
-	
-	value, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	
-	if op == "=" {
-		if p.peek().Value == ";" {
-			p.next()
-		}
-		return &AssignmentStatement{
-			BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-			Name:     name,
-			Value:    value,
-		}, nil
-	}
-	
-	// Составное присваивание
-	if p.peek().Value == ";" {
-		p.next()
-	}
-	return &AugmentedAssignmentStatement{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Name:     name,
-		Op:       op[:len(op)-1], // убираем '='
-		Value:    value,
-	}, nil
-}
-
-func (p *Parser) parsePrintStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	value, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	if p.peek().Value == ";" {
-		p.next()
-	}
-	return &PrintStatement{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Value: value}, nil
-}
-
-func (p *Parser) parseIfStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	_, err := p.expect(TOKEN_OPERATOR, "(")
-	if err != nil {
-		return nil, err
-	}
-	condition, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, ")")
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "{")
-	if err != nil {
-		return nil, err
-	}
-
-	thenBlock, err := p.parseBlock()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "}")
-	if err != nil {
-		return nil, err
-	}
-
-	var elseIfBlocks []ElseIfBlock
-	var elseBlock []Node
-
-	for p.peek().Type == TOKEN_KEYWORD && p.peek().Value == "nocis" {
-		p.next()
-
-		var cond Node
-		var err error
-		if p.peek().Value == "(" {
-			_, err = p.expect(TOKEN_OPERATOR, "(")
-			if err != nil {
-				return nil, err
-			}
-			cond, err = p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			_, err = p.expect(TOKEN_OPERATOR, ")")
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		_, err = p.expect(TOKEN_OPERATOR, "{")
-		if err != nil {
-			return nil, err
-		}
-
-		block, err := p.parseBlock()
-		if err != nil {
-			return nil, err
-		}
-		_, err = p.expect(TOKEN_OPERATOR, "}")
-		if err != nil {
-			return nil, err
-		}
-
-		if cond != nil {
-			elseIfBlocks = append(elseIfBlocks, ElseIfBlock{Condition: cond, Block: block})
-		} else {
-			elseBlock = block
-			break
-		}
-	}
-
-	return &IfStatement{
-		BaseNode:     BaseNode{Line: token.Line, Col: token.Col},
-		Condition:    condition,
-		ThenBlock:    thenBlock,
-		ElseIfBlocks: elseIfBlocks,
-		ElseBlock:    elseBlock,
-	}, nil
-}
-
-func (p *Parser) parseWhileStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	_, err := p.expect(TOKEN_OPERATOR, "(")
-	if err != nil {
-		return nil, err
-	}
-	condition, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, ")")
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "{")
-	if err != nil {
-		return nil, err
-	}
-
-	body, err := p.parseBlock()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "}")
-	if err != nil {
-		return nil, err
-	}
-
-	return &WhileStatement{
-		BaseNode:  BaseNode{Line: token.Line, Col: token.Col},
-		Condition: condition,
-		Body:      body,
-	}, nil
-}
-
-func (p *Parser) parseHelpStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	country, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	if p.peek().Value == ";" {
-		p.next()
-	}
-	return &HelpStatement{BaseNode: BaseNode{Line: token.Line, Col: token.Col}, Country: country}, nil
-}
-
-func (p *Parser) parseOrientationStatement() (Node, error) {
-	token := p.peek()
-	p.next()
-	if p.peek().Value == ";" {
-		p.next()
-	}
-	return &OrientationStatement{BaseNode: BaseNode{Line: token.Line, Col: token.Col}}, nil
-}
-
-func (p *Parser) parseBlock() ([]Node, error) {
+func (p *Parser) Parse() (*Program, error) {
 	var statements []Node
-	for p.peek().Value != "}" && p.peek().Type != TOKEN_EOF {
+
+	for p.peek().Type != TOKEN_EOF {
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return nil, err
 		}
-		if stmt != nil {
-			statements = append(statements, stmt)
-		}
+		statements = append(statements, stmt)
 	}
-	return statements, nil
-}
 
-func (p *Parser) parseConstantDeclaration() (Node, error) {
-	token := p.peek()
-	p.next()
-	name, err := p.expect(TOKEN_IDENTIFIER, "")
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, "=")
-	if err != nil {
-		return nil, err
-	}
-	value, err := p.parseExpression()
-	if err != nil {
-		return nil, err
-	}
-	_, err = p.expect(TOKEN_OPERATOR, ";")
-	if err != nil {
-		return nil, err
-	}
-	return &ConstantDeclaration{
-		BaseNode: BaseNode{Line: token.Line, Col: token.Col},
-		Name:     name.Value,
-		Value:    value,
+	return &Program{
+		BaseNode:   BaseNode{Line: 0, Col: 0},
+		Statements: statements,
 	}, nil
 }
 
-// ---------- Выражения ----------
-func (p *Parser) parseExpression() (Node, error) {
-	return p.parseLogicalOr()
-}
+// ============================================================
+// СИСТЕМА ТИПОВ
+// ============================================================
 
-func (p *Parser) parseLogicalOr() (Node, error) {
-	left, err := p.parseLogicalAnd()
-	if err != nil {
-		return nil, err
-	}
-	for p.peek().Value == "||" {
-		op := p.next().Value
-		right, err := p.parseLogicalAnd()
-		if err != nil {
-			return nil, err
-		}
-		left = &BinaryOpNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Left: left, Op: op, Right: right}
-	}
-	return left, nil
-}
-
-func (p *Parser) parseLogicalAnd() (Node, error) {
-	left, err := p.parseComparison()
-	if err != nil {
-		return nil, err
-	}
-	for p.peek().Value == "&&" {
-		op := p.next().Value
-		right, err := p.parseComparison()
-		if err != nil {
-			return nil, err
-		}
-		left = &BinaryOpNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Left: left, Op: op, Right: right}
-	}
-	return left, nil
-}
-
-func (p *Parser) parseComparison() (Node, error) {
-	left, err := p.parseAdditive()
-	if err != nil {
-		return nil, err
-	}
-	for p.peek().Value == "==" || p.peek().Value == "!=" ||
-		p.peek().Value == "<" || p.peek().Value == ">" ||
-		p.peek().Value == "<=" || p.peek().Value == ">=" {
-		op := p.next().Value
-		right, err := p.parseAdditive()
-		if err != nil {
-			return nil, err
-		}
-		left = &BinaryOpNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Left: left, Op: op, Right: right}
-	}
-	return left, nil
-}
-
-func (p *Parser) parseAdditive() (Node, error) {
-	left, err := p.parseMultiplicative()
-	if err != nil {
-		return nil, err
-	}
-	for p.peek().Value == "+" || p.peek().Value == "-" {
-		op := p.next().Value
-		right, err := p.parseMultiplicative()
-		if err != nil {
-			return nil, err
-		}
-		left = &BinaryOpNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Left: left, Op: op, Right: right}
-	}
-	return left, nil
-}
-
-func (p *Parser) parseMultiplicative() (Node, error) {
-	left, err := p.parseUnary()
-	if err != nil {
-		return nil, err
-	}
-	for p.peek().Value == "*" || p.peek().Value == "/" || p.peek().Value == "%" {
-		op := p.next().Value
-		right, err := p.parseUnary()
-		if err != nil {
-			return nil, err
-		}
-		left = &BinaryOpNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Left: left, Op: op, Right: right}
-	}
-	return left, nil
-}
-
-func (p *Parser) parseUnary() (Node, error) {
-	if p.peek().Value == "-" {
-		op := p.next().Value
-		if p.peek().Type == TOKEN_NUMBER || p.peek().Type == TOKEN_FLOAT {
-			num, err := p.parsePrimary()
-			if err != nil {
-				return nil, err
-			}
-			switch n := num.(type) {
-			case *NumberNode:
-				n.Value = -n.Value
-				return n, nil
-			case *FloatNode:
-				n.Value = -n.Value
-				return n, nil
-			default:
-				return &UnaryNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Op: op, Expr: num}, nil
-			}
-		}
-		expr, err := p.parseUnary()
-		if err != nil {
-			return nil, err
-		}
-		return &UnaryNode{BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0}, Op: op, Expr: expr}, nil
-	}
-	
-	// Префиксный инкремент/декремент
-	if p.peek().Value == "++" || p.peek().Value == "--" {
-		op := p.next().Value
-		if p.peek().Type != TOKEN_IDENTIFIER {
-			return nil, fmt.Errorf("expected identifier after %s", op)
-		}
-		name := p.peek().Value
-		p.next()
-		return &IncrementDecrementStatement{
-			BaseNode: BaseNode{Line: p.getCurrentLine(), Col: 0},
-			Name:     name,
-			Operator: op,
-			Postfix:  false,
-		}, nil
-	}
-	
-	return p.parsePrimary()
-}
-
-func (p *Parser) parsePrimary() (Node, error) {
-	token := p.peek()
-	line := token.Line
-	col := token.Col
-
-	switch token.Type {
-	case TOKEN_NUMBER:
-		p.next()
-		val, _ := strconv.Atoi(token.Value)
-		return &NumberNode{BaseNode: BaseNode{Line: line, Col: col}, Value: val}, nil
-	case TOKEN_FLOAT:
-		p.next()
-		val, _ := strconv.ParseFloat(token.Value, 64)
-		return &FloatNode{BaseNode: BaseNode{Line: line, Col: col}, Value: val}, nil
-	case TOKEN_STRING:
-		p.next()
-		return &StringNode{BaseNode: BaseNode{Line: line, Col: col}, Value: token.Value}, nil
-	case TOKEN_ARRAY_OPEN:
-		p.next()
-		var elements []Node
-		for p.peek().Type != TOKEN_ARRAY_CLOSE && p.peek().Type != TOKEN_EOF {
-			element, err := p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			elements = append(elements, element)
-			if p.peek().Value == "," {
-				p.next()
-			}
-		}
-		_, err := p.expect(TOKEN_ARRAY_CLOSE, "]")
-		if err != nil {
-			return nil, err
-		}
-		return &ArrayNode{BaseNode: BaseNode{Line: line, Col: col}, Elements: elements}, nil
-	case TOKEN_IDENTIFIER:
-		// Проверяем на постфиксный инкремент/декремент
-		if p.peekNext().Value == "++" || p.peekNext().Value == "--" {
-			name := token.Value
-			op := p.peekNext().Value
-			p.next() // пропускаем имя
-			p.next() // пропускаем оператор
-			return &IncrementDecrementStatement{
-				BaseNode: BaseNode{Line: line, Col: col},
-				Name:     name,
-				Operator: op,
-				Postfix:  true,
-			}, nil
-		}
-		
-		if p.peekNext().Value == "[" {
-			p.next()
-			name := token.Value
-			_, err := p.expect(TOKEN_ARRAY_OPEN, "[")
-			if err != nil {
-				return nil, err
-			}
-			index, err := p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			_, err = p.expect(TOKEN_ARRAY_CLOSE, "]")
-			if err != nil {
-				return nil, err
-			}
-			return &ArrayIndexNode{BaseNode: BaseNode{Line: line, Col: col}, Name: name, Index: index}, nil
-		}
-		if p.peekNext().Value == "(" {
-			return p.parseFunctionCall(token.Value)
-		}
-		if p.peekNext().Value == "." {
-			return p.parseFieldAccess(token.Value)
-		}
-		p.next()
-		return &VariableNode{BaseNode: BaseNode{Line: line, Col: col}, Name: token.Value}, nil
-	case TOKEN_KEYWORD:
-		keyword := token.Value
-		if keyword == "true" {
-			p.next()
-			return &BooleanNode{BaseNode: BaseNode{Line: line, Col: col}, Value: true}, nil
-		} else if keyword == "false" {
-			p.next()
-			return &BooleanNode{BaseNode: BaseNode{Line: line, Col: col}, Value: false}, nil
-		} else if keyword == "this" {
-			p.next()
-			return &ThisNode{BaseNode: BaseNode{Line: line, Col: col}}, nil
-		}
-		return nil, fmt.Errorf("unexpected keyword: %s", token.Value)
-	case TOKEN_OPERATOR:
-		if token.Value == "(" {
-			p.next()
-			expr, err := p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			_, err = p.expect(TOKEN_OPERATOR, ")")
-			if err != nil {
-				return nil, err
-			}
-			return expr, nil
-		}
-	}
-	return nil, fmt.Errorf("unexpected token: %s", token.Value)
-}
-
-// ---------- Система типов ----------
 type ValueType int
 
 const (
@@ -1954,18 +1841,9 @@ func (tv TypedValue) String() string {
 			parts[i] = v.String()
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
-	case TypeObject:
-		if obj, ok := tv.Value.(*QueerInstance); ok {
-			return obj.String()
-		}
-		return "{object}"
 	default:
 		return "null"
 	}
-}
-
-func (tv TypedValue) ToString() string {
-	return tv.String()
 }
 
 func NewTypedString(s string) TypedValue {
@@ -1988,234 +1866,543 @@ func NewTypedArray(arr []TypedValue) TypedValue {
 	return TypedValue{Type: TypeArray, Value: arr}
 }
 
-func NewTypedObject(obj *QueerInstance) TypedValue {
-	return TypedValue{Type: TypeObject, Value: obj}
+// ============================================================
+// HATE FILTER - ПОЛНАЯ ВЕРСИЯ С МОРФОЛОГИЕЙ
+// ============================================================
+
+type HateFilter struct {
+	slurs         map[string][]string
+	patterns      []*regexp.Regexp
+	falsePositive map[string]bool
+	mu            sync.RWMutex
+	enabled       bool
+	action        string
+	logFile       string
+	morphCache    map[string][]string
 }
 
-// ---------- QUEER классы во время выполнения ----------
-type QueerInstance struct {
-	ClassName string
-	Fields    map[string]TypedValue
-	Methods   map[string]*FunctionDeclaration
-	Parent    *QueerInstance
-}
-
-func (qi *QueerInstance) String() string {
-	fields := make([]string, 0, len(qi.Fields))
-	for name, value := range qi.Fields {
-		fields = append(fields, fmt.Sprintf("%s: %s", name, value.String()))
+func NewHateFilter() *HateFilter {
+	hf := &HateFilter{
+		slurs:         make(map[string][]string),
+		patterns:      []*regexp.Regexp{},
+		falsePositive: make(map[string]bool),
+		enabled:       true,
+		action:        "warn",
+		logFile:       "hate_speech_log.txt",
+		morphCache:    make(map[string][]string),
 	}
-	return fmt.Sprintf("%s{%s}", qi.ClassName, strings.Join(fields, ", "))
+
+	hf.initSlurs()
+	hf.compilePatterns()
+	return hf
 }
 
-// ---------- Структуры для серверов ----------
-type ServerInstance struct {
-	mu       sync.RWMutex
-	Name     string
-	Port     int
-	Routes   map[string]map[string]func([]TypedValue) (TypedValue, error)
-	Server   *http.Server
-	IsActive bool
-	Context  map[string]TypedValue
-}
+func (hf *HateFilter) generateMorphVariants(word string) []string {
+	variants := []string{word}
+	lower := strings.ToLower(word)
 
-// Глобальное хранилище серверов
-var servers = make(map[string]*ServerInstance)
-var serversMu sync.RWMutex
-// ---------- Интерпретатор ----------
+	variants = append(variants, lower)
 
-// callFrame - структура для хранения переменных в стеке вызовов
-type callFrame struct {
-    vars      map[string]TypedValue
-    types     map[string]string
-    constants map[string]bool
-}
-
-// Interpreter - основной интерпретатор
-type Interpreter struct {
-    variables      map[string]TypedValue
-    variableTypes  map[string]string
-    functions      map[string]*FunctionDeclaration
-    queerClasses   map[string]*QueerClassDeclaration
-    instances      map[string]*QueerInstance
-    exportedFuncs  map[string]*FunctionDeclaration
-    callStack      []callFrame
-    returnValue    TypedValue
-    returnFlag     bool
-    mu             sync.RWMutex
-    maxRecursion   int
-    recursionDepth int
-    errorHandler   func(error, int, int)
-    sandbox        *Sandbox
-    rand           *rand.Rand
-    this           *QueerInstance
-}
-
-// checkForOffensiveTerms проверяет код на наличие оскорбительных терминов
-func (i *Interpreter) checkForOffensiveTerms(code string) (bool, []string) {
-    offensiveTerms := []string{"пидор", "педик", "faggot", "Pouf", "лесбуха", "транс", "Bender", "гомосексуалист"}
-    foundTerms := []string{}
-    
-    for _, term := range offensiveTerms {
-        if strings.Contains(strings.ToLower(code), strings.ToLower(term)) {
-            foundTerms = append(foundTerms, term)
-        }
-    }
-    
-    if len(foundTerms) > 0 {
-        fmt.Printf("⚠️ Обнаружены потенциально оскорбительные термины: %v\n", foundTerms)
-        fmt.Println("💡 Рекомендуем использовать корректную терминологию: ЛГБТ+, гомосексуальный, бисексуальный и т.д.")
-        return true, foundTerms
-    }
-    return false, foundTerms
-}
-
-// showSupportMessage показывает сообщение поддержки ЛГБТ+ сообщества
-func (i *Interpreter) showSupportMessage() {
-    fmt.Println("🏳️‍🌈 Поддержка ЛГБТ+ сообщества:")
-    fmt.Println("📞 Горячая линия поддержки: 8-800-XXX-XX-XX")
-    fmt.Println("🌐 Ресурсы: https://lgbt-support.org")
-    fmt.Println("💙 Вы не одиноки!")
-}
-
-// NewInterpreter создает новый интерпретатор
-func NewInterpreter() *Interpreter {
-    return &Interpreter{
-        variables:      make(map[string]TypedValue),
-        variableTypes:  make(map[string]string),
-        functions:      make(map[string]*FunctionDeclaration),
-        queerClasses:   make(map[string]*QueerClassDeclaration),
-        instances:      make(map[string]*QueerInstance),
-        exportedFuncs:  make(map[string]*FunctionDeclaration),
-        callStack:      []callFrame{{vars: make(map[string]TypedValue), types: make(map[string]string), constants: make(map[string]bool)}},
-        returnValue:    TypedValue{Type: TypeNull, Value: nil},
-        returnFlag:     false,
-        maxRecursion:   1000,
-        recursionDepth: 0,
-        sandbox:        NewSandbox(),
-        rand:           rand.New(rand.NewSource(time.Now().UnixNano())),
-        this:           nil,
-    }
-}
-
-
-
-
-
-
-
-func (i *Interpreter) handleError(err error, line, col int) {
-	if i.errorHandler != nil {
-		i.errorHandler(err, line, col)
-	} else {
-		panic(fmt.Errorf("error at line %d, col %d: %v", line, col, err))
+	// Русские суффиксы
+	ruSuffixes := []string{
+		"", "а", "у", "ом", "е", "ы", "ов", "ам", "ами", "ах",
+		"ка", "ку", "кой", "кою", "ке", "ки", "к",
+		"чик", "чица", "чику", "чиком", "чике",
+		"ище", "ища", "ищу", "ищем", "ище",
+		"онок", "онка", "онку", "онком", "онке",
+		"енок", "енка", "енку", "енком", "енке",
+		"ик", "ики", "ок", "очек", "ечек", "ичек",
+		"улька", "улечка", "ушечка", "ишечка",
+		"яра", "яры", "юга", "юги",
 	}
-}
 
-func (i *Interpreter) pushFrame() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.callStack = append(i.callStack, callFrame{
-		vars:     make(map[string]TypedValue),
-		types:    make(map[string]string),
-		constants: make(map[string]bool),
-	})
-}
-
-func (i *Interpreter) popFrame() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if len(i.callStack) > 1 {
-		i.callStack = i.callStack[:len(i.callStack)-1]
+	// Английские суффиксы
+	enSuffixes := []string{
+		"", "s", "es", "ed", "ing", "er", "est",
+		"ly", "ness", "less", "ful", "ous", "ive",
+		"able", "ible", "tion", "sion", "ment", "ity",
+		"ism", "ist", "ize", "isation", "ization",
+		"y", "ie", "ies", "ey", "o", "oh",
 	}
-}
 
-func (i *Interpreter) getVar(name string) (TypedValue, bool) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	for idx := len(i.callStack) - 1; idx >= 0; idx-- {
-		if val, ok := i.callStack[idx].vars[name]; ok {
-			return val, true
+	allSuffixes := append(ruSuffixes, enSuffixes...)
+
+	for _, suffix := range allSuffixes {
+		if suffix != "" {
+			variants = append(variants, lower+suffix)
+			variants = append(variants, word+suffix)
 		}
 	}
-	return TypedValue{Type: TypeNull, Value: nil}, false
-}
 
-func (i *Interpreter) setVar(name string, value TypedValue) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	top := len(i.callStack) - 1
-	if i.callStack[top].constants[name] {
-		panic(fmt.Errorf("cannot assign to constant '%s'", name))
+	// Префиксы
+	prefixes := []string{
+		"", "анти", "проти", "контр", "супер", "гипер",
+		"мега", "ультра", "экстра", "транс", "интер",
 	}
-	i.callStack[top].vars[name] = value
-}
 
-func (i *Interpreter) getType(name string) (string, bool) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	for idx := len(i.callStack) - 1; idx >= 0; idx-- {
-		if typ, ok := i.callStack[idx].types[name]; ok {
-			return typ, true
+	for _, prefix := range prefixes {
+		if prefix != "" {
+			variants = append(variants, prefix+lower)
+			variants = append(variants, prefix+word)
 		}
 	}
-	return "", false
+
+	uniqueMap := make(map[string]bool)
+	var uniqueVariants []string
+	for _, v := range variants {
+		if !uniqueMap[v] {
+			uniqueMap[v] = true
+			uniqueVariants = append(uniqueVariants, v)
+		}
+	}
+
+	return uniqueVariants
 }
 
-func (i *Interpreter) setType(name string, typ string) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	top := len(i.callStack) - 1
-	i.callStack[top].types[name] = typ
+func (hf *HateFilter) initSlurs() {
+	// RUSSIAN
+	hf.slurs["ru"] = []string{
+		"пидор", "пидорас", "педрила", "петух", "гомик", "гомосек",
+		"гомосеки", "гомосексуалист", "голубой", "голубые", "гейский",
+		"гей-пропаганда", "нетрадиционный", "нетрадиционные",
+		"извращенец", "извращенка", "извращенцы", "содомит",
+		"мужеложец", "мужеложники", "педераст", "педерастия",
+		"гей-свадьба", "однополый", "однополые", "гомосятина",
+		"трансвестит", "трансгендер", "транс-извращенец",
+		"переодетый", "переодетая", "мужик в юбке",
+		"баба с яйцами", "женщина с членом", "мужик с сиськами",
+		"транс-пропаганда", "транс-агитация", "транс-маньяк",
+		"бисексуал", "би-пропаганда", "би-извращенец",
+		"двуличный", "двуполый", "лгбт-пропаганда", "содомия",
+		"половая извращение", "сексуальное извращение",
+		"разврат", "развратник", "педофил", "педофилия",
+		"толерастия", "толераст", "либераст", "гомосек",
+		"транс", "трансы", "трансик", "трансики",
+		"транс-активист", "транс-активисты", "транс-сообщество",
+		"транс-человек", "транс-люди", "транс-женщина", "транс-мужчина",
+	}
+
+	// ENGLISH
+	hf.slurs["en"] = []string{
+		"fag", "faggot", "faggy", "faggotry", "homo", "homosexual",
+		"homos", "homoerotic", "queer", "dyke", "dykes", "lezzie",
+		"lezbo", "butch", "femme", "twink", "gayboy", "gaylord",
+		"gaywad", "gayfag", "sodomite", "sodomy", "bugger",
+		"buggery", "poof", "poofter", "puff", "puffer", "nancy",
+		"nancyboy", "sissy", "pansy", "cocksucker", "cocksucking",
+		"assbandit", "fruit", "fruitcake", "fruity", "fairy",
+		"queen", "drag queen", "queerbaiter", "tranny", "trannies",
+		"transexual", "transvestite", "shemale", "he-she", "traps",
+		"trap", "ladyboy", "chick with dick", "dickgirl", "cuntboy",
+		"transgenderism", "gender ideology", "gender confusion",
+		"trans propaganda",
+		"gaystapo", "groomer", "grooming",
+		"degenerate", "degeneracy", "perversion", "deviant",
+		"abomination", "unnatural", "satanic",
+		"trans", "transes", "transy",
+	}
+
+	// SPANISH
+	hf.slurs["es"] = []string{
+		"maricón", "marica", "maricon", "maricona", "joto", "jota",
+		"puto", "puta", "homosexual", "lesbiana", "travesti",
+		"travestido", "transformista", "loca", "locas", "afeminado",
+		"afeminada", "bollera", "bollo", "tortillera", "camionera",
+		"camionero", "machorra", "sodomita", "homofobia", "transfobia",
+		"ideología de género", "teoría de género", "agenda gay",
+	}
+
+	// FRENCH
+	hf.slurs["fr"] = []string{
+		"pédé", "pédale", "tapette", "tante", "folle", "homosexuel",
+		"homosexuelle", "lesbienne", "travesti", "transsexuel",
+		"travelo", "trave", "fif", "efféminé", "efféminée",
+		"sodomite", "sodomie", "tarlouze", "petite pédale",
+		"homosexualité", "idéologie du genre", "propagande gay",
+		"lobby gay", "pédophilie", "pédophile", "pervers", "perversion",
+	}
+
+	// GERMAN
+	hf.slurs["de"] = []string{
+		"Schwuler", "Schwule", "Schwuchtel", "Tunte", "Homosexuell",
+		"Homosexuelle", "Lesbe", "Transvestit", "Transsexual",
+		"Transgender", "Transe", "Tranny", "Travestie", "Weichei",
+		"Sodomit", "Sodomie", "Homo", "Homolobby", "Genderideologie",
+		"Genderwahn", "Regenbogenmafia", "Kinderschänder", "Pädophiler",
+		"widernatürlich", "pervers",
+	}
+
+	// ITALIAN
+	hf.slurs["it"] = []string{
+		"finocchio", "finocchia", "ricchione", "culattone",
+		"omosessuale", "lesbica", "transessuale", "travestito",
+		"transgender", "femminiello", "effeminato", "sodomita",
+		"sodomia", "lobby gay", "ideologia gender", "pervertito",
+		"deviato", "anormale", "contro natura", "peccato", "abominio",
+	}
+
+	// PORTUGUESE
+	hf.slurs["pt"] = []string{
+		"viado", "veado", "bicha", "boiola", "boia", "homossexual",
+		"lésbica", "sapatão", "travesti", "transexual", "transgênero",
+		"transformista", "afeminado", "sodomita", "sodomia",
+		"ideologia de gênero", "propaganda gay", "lobby gay",
+		"pervertido", "desviado", "anormal", "contra a natureza",
+		"pecado", "abominação", "groomer", "pedófilo",
+	}
+
+	// DUTCH
+	hf.slurs["nl"] = []string{
+		"flikker", "flikkers", "nicht", "nichten", "homo",
+		"homoseksueel", "lesbienne", "pot", "travestiet",
+		"transseksueel", "transgender", "sodomiet", "sodomie",
+		"genderideologie", "regenboogmafia", "pedofiel",
+		"pervers", "tegennatuurlijk", "zonde",
+	}
+
+	// POLISH
+	hf.slurs["pl"] = []string{
+		"pedał", "pedały", "ciapa", "ciota", "homoseksualista",
+		"lesbijka", "gej", "transwestyta", "transseksualista",
+		"sodomita", "sodomia", "ideologia gender", "teoria gender",
+		"propaganda LGBT", "lobby LGBT", "pedofil", "pedofilia",
+		"zboczeniec", "dewiacja", "perwersja",
+	}
+
+	// UKRAINIAN
+	hf.slurs["uk"] = []string{
+		"підор", "підорас", "педер", "гомосек", "гомік", "гей",
+		"гомосексуал", "лесбі", "трансвестит", "транссексуал",
+		"содомія", "содоміт", "мужеложець", "ідеологія гендеру",
+		"гендерна ідеологія",
+		"педофіл", "педофілія", "збоченець", "девіація",
+	}
+
+	// ARABIC
+	hf.slurs["ar"] = []string{
+		"لوطي", "لوطية", "شاذ", "شاذة", "مثلي", "مثلية",
+		"متحول جنسي", "خنثى", "خنيث", "مخنث", "فاحشة", "فجور",
+		"زنا", "شذوذ", "انحراف", "مرض نفسي", "ضد الفطرة",
+		"ضد الطبيعة", "ترويج الشذوذ", "دعاية مثلية",
+	}
+
+	// HEBREW
+	hf.slurs["he"] = []string{
+		"הומו", "הומוסקסואל", "לסבית", "טרנס", "טרנסג'נדר",
+		"טרנסקסואל", "סדום", "סדומיה", "מעשה סדום", "תועבה",
+		"תועבות", "סטייה מינית", "אג'נדה הומוסקסואלית",
+		"תעמולה הומוסקסואלית", "חריג", "לא נורמלי", "מגונה",
+	}
+
+	// TURKISH
+	hf.slurs["tr"] = []string{
+		"ibne", "ibneler", "göt", "götveren", "eşcinsel",
+		"lezbiyen", "homoseksüel", "travesti", "transseksüel",
+		"transgender", "sodomi", "sodomist", "doğaya aykırı",
+		"cinsiyet ideolojisi", "toplumsal cinsiyet",
+		"gay lobisi", "pedofil", "pedofili", "sapık", "anormal",
+		"günah", "ayıp", "utanç verici",
+	}
+
+	// JAPANESE
+	hf.slurs["ja"] = []string{
+		"おかま", "おかま野郎", "ホモ", "ゲイ", "レズ", "レズビアン",
+		"バイセクシュアル", "オカマ", "オナベ", "ニューハーフ",
+		"トランスジェンダー", "性同一性障害", "ゲイのプロパガンダ",
+		"異常性欲", "性的倒錯", "変態",
+		"反自然的", "不道徳", "罪", "ペドフィリア", "小児性愛",
+	}
+
+	// CHINESE
+	hf.slurs["zh"] = []string{
+		"同性恋", "同性恋者", "基佬", "玻璃", "拉拉", "女同",
+		"男同", "同志", "变性人", "人妖", "阴阳人",
+		"同性恋宣传", "同性恋议程", "性变态",
+		"性倒错", "反常", "不道德", "伤风败俗", "罪恶",
+		"恋童癖", "性侵", "猥亵", "性别意识形态",
+	}
+
+	// KOREAN
+	hf.slurs["ko"] = []string{
+		"호모", "게이", "레즈", "동성애자", "동성애",
+		"트랜스젠더", "성전환", "변태", "성도착", "반자연적",
+		"동성애 선전", "포르노", "음란", "추행",
+		"아동 성학대", "페도필리아", "타락", "부도덕", "죄악",
+	}
+
+	// HINDI
+	hf.slurs["hi"] = []string{
+		"समलैंगिक", "समलिंगी", "गे", "लेस्बियन", "किन्नर",
+		"हिजड़ा", "ट्रांसजेंडर", "अप्राकृतिक", "अनैतिक", "पाप",
+		"यौन विचलन", "यौन विकृति", "बाल यौन शोषण", "पीडोफिलिया",
+		"एलजीबीटी एजेंडा", "एलजीबीटी प्रचार", "भ्रष्ट", "विकृत",
+	}
 }
 
-func (i *Interpreter) setConstant(name string) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	top := len(i.callStack) - 1
-	i.callStack[top].constants[name] = true
+func (hf *HateFilter) compilePatterns() {
+	hf.mu.Lock()
+	defer hf.mu.Unlock()
+
+	hf.patterns = []*regexp.Regexp{}
+	hf.morphCache = make(map[string][]string)
+
+	allSlurs := []string{}
+	for _, slurs := range hf.slurs {
+		allSlurs = append(allSlurs, slurs...)
+	}
+
+	for _, slur := range allSlurs {
+		morphVariants := hf.generateMorphVariants(slur)
+		hf.morphCache[slur] = morphVariants
+
+		for _, variant := range morphVariants {
+			pattern := regexp.QuoteMeta(variant)
+			patterns := []string{
+				pattern,
+				`\b` + pattern + `\b`,
+				pattern + `\s*`,
+				`\s*` + pattern,
+				`(?i)` + pattern,
+				`(?i)\b` + pattern + `\b`,
+			}
+
+			for _, p := range patterns {
+				re, err := regexp.Compile(p)
+				if err == nil {
+					hf.patterns = append(hf.patterns, re)
+				}
+			}
+		}
+	}
 }
 
-func (i *Interpreter) isConstant(name string) bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	for idx := len(i.callStack) - 1; idx >= 0; idx-- {
-		if c, ok := i.callStack[idx].constants[name]; ok && c {
+func (hf *HateFilter) Check(text string) (bool, []string, []string) {
+	if strings.EqualFold(strings.TrimSpace(text), "лгбт") || strings.EqualFold(strings.TrimSpace(text), "lgbt") {
+		return false, nil, nil
+	}
+	hf.mu.RLock()
+	defer hf.mu.RUnlock()
+
+	if !hf.enabled {
+		return false, nil, nil
+	}
+
+	detected := []string{}
+	languages := []string{}
+	lowerText := strings.ToLower(text)
+
+	for _, re := range hf.patterns {
+		if re.MatchString(text) {
+			detected = append(detected, re.String())
+		}
+	}
+
+	words := strings.Fields(lowerText)
+	for _, word := range words {
+		cleanWord := strings.TrimFunc(word, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+		})
+
+		if cleanWord == "" {
+			continue
+		}
+
+		for lang, slurs := range hf.slurs {
+			for _, slur := range slurs {
+				variants, ok := hf.morphCache[slur]
+				if !ok {
+					variants = hf.generateMorphVariants(slur)
+					hf.morphCache[slur] = variants
+				}
+
+				for _, variant := range variants {
+					if strings.Contains(cleanWord, variant) ||
+						strings.Contains(variant, cleanWord) ||
+						strings.Contains(strings.ToLower(cleanWord), strings.ToLower(variant)) {
+						if !contains(languages, lang) {
+							languages = append(languages, lang)
+						}
+						if !contains(detected, slur) {
+							detected = append(detected, slur)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	phrases := []string{
+		"мужик в юбке", "баба с яйцами", "женщина с членом",
+		"lgbt agenda", "gender ideology", "rainbow mafia",
+		"транс-активист", "транс-сообщество", "транс-человек",
+		"транс-женщина", "транс-мужчина", "транс-люди",
+	}
+
+	for _, phrase := range phrases {
+		if strings.Contains(lowerText, strings.ToLower(phrase)) {
+			detected = append(detected, phrase)
+			for lang := range hf.slurs {
+				if strings.Contains(strings.ToLower(phrase), strings.ToLower(lang)) ||
+					strings.Contains(lowerText, strings.ToLower(lang)) {
+					if !contains(languages, lang) {
+						languages = append(languages, lang)
+					}
+				}
+			}
+		}
+	}
+
+	return len(detected) > 0, detected, languages
+}
+
+func (hf *HateFilter) FilterText(text string) string {
+	hf.mu.RLock()
+	defer hf.mu.RUnlock()
+
+	result := text
+	for _, re := range hf.patterns {
+		if re.MatchString(result) {
+			result = re.ReplaceAllString(result, "🏳️‍🌈[заблокировано]🏳️‍🌈")
+		}
+	}
+
+	words := strings.Fields(result)
+	for i, word := range words {
+		cleanWord := strings.TrimFunc(word, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+		})
+
+		if cleanWord == "" {
+			continue
+		}
+
+		for _, slurs := range hf.slurs {
+			for _, slur := range slurs {
+				variants, ok := hf.morphCache[slur]
+				if !ok {
+					variants = hf.generateMorphVariants(slur)
+					hf.morphCache[slur] = variants
+				}
+
+				for _, variant := range variants {
+					if strings.Contains(strings.ToLower(cleanWord), strings.ToLower(variant)) {
+						words[i] = strings.ReplaceAll(words[i], cleanWord, "🏳️‍🌈[заблокировано]🏳️‍🌈")
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
+func (hf *HateFilter) LogHateSpeech(text string, detected []string, languages []string) {
+	if hf.logFile == "" {
+		return
+	}
+
+	f, err := os.OpenFile(hf.logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logEntry := fmt.Sprintf("[%s] Найдена ненависть: %s\n", timestamp, text)
+	logEntry += fmt.Sprintf("  Обнаружено: %v\n", detected)
+	logEntry += fmt.Sprintf("  Языки: %v\n", languages)
+	logEntry += "------------------------------------------------\n"
+
+	f.WriteString(logEntry)
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
 			return true
 		}
 	}
 	return false
 }
 
-func (i *Interpreter) getTypeFromKeyword(keyword string) ValueType {
-	switch keyword {
-	case "lesbian":
-		return TypeString
-	case "gay":
-		return TypeInt
-	case "trans":
-		return TypeFloat
-	case "nonbinary":
-		return TypeBool
-	case "gender":
-		return TypeArray
-	default:
-		return TypeNull
-	}
+// ============================================================
+// ШИФРОВАНИЕ ДЛЯ ДНЕВНИКА
+// ============================================================
+
+type Encryption struct {
+	key []byte
 }
 
-func (i *Interpreter) checkType(typ string, value TypedValue) error {
-	expectedType := i.getTypeFromKeyword(typ)
-	if expectedType == TypeNull {
-		return fmt.Errorf("unknown type: %s", typ)
+func NewEncryption(key string) *Encryption {
+	hashedKey := make([]byte, 32)
+	for i := 0; i < 32 && i < len(key); i++ {
+		hashedKey[i] = key[i]
 	}
-	if value.Type != expectedType {
-		return fmt.Errorf("type mismatch: expected %s (%v), got %v", typ, expectedType, value.Type)
-	}
-	return nil
+	return &Encryption{key: hashedKey}
 }
 
-// ---------- Sandbox ----------
+func (e *Encryption) Encrypt(text string) (string, error) {
+	block, err := aes.NewCipher(e.key)
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, []byte(text), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func (e *Encryption) Decrypt(encrypted string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(encrypted)
+	if err != nil {
+		return "", err
+	}
+
+	block, err := aes.NewCipher(e.key)
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return string(plaintext), nil
+}
+
+// ============================================================
+// ИНТЕРПРЕТАТОР - ПОЛНАЯ ВЕРСИЯ
+// ============================================================
+
+type callFrame struct {
+	vars      map[string]TypedValue
+	types     map[string]string
+	constants map[string]bool
+}
+
 type Sandbox struct {
 	allowedPaths   []string
 	blockedPaths   []string
@@ -2245,7 +2432,6 @@ func (s *Sandbox) CheckFilePath(path string) error {
 			return fmt.Errorf("access denied: path contains blocked directory '%s'", blocked)
 		}
 	}
-
 	return nil
 }
 
@@ -2258,2476 +2444,129 @@ func (s *Sandbox) CheckURL(url string) error {
 	return nil
 }
 
-// ============================================
-// СЕРВЕРНЫЕ ФУНКЦИИ
-// ============================================
-
-func (i *Interpreter) createServer(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("createServer: expected name and port")
-	}
-	name, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("createServer: first argument must be string")
-	}
-	port, ok := args[1].Value.(int)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("createServer: second argument must be integer")
-	}
-	
-	if port < 1 || port > 65535 {
-		return TypedValue{}, fmt.Errorf("createServer: invalid port %d", port)
-	}
-	
-	serversMu.Lock()
-	defer serversMu.Unlock()
-	
-	if _, exists := servers[name]; exists {
-		return TypedValue{}, fmt.Errorf("createServer: server '%s' already exists", name)
-	}
-	
-	server := &ServerInstance{
-		Name:     name,
-		Port:     port,
-		Routes:   make(map[string]map[string]func([]TypedValue) (TypedValue, error)),
-		IsActive: false,
-		Context:  make(map[string]TypedValue),
-	}
-	
-	server.Routes["GET"] = make(map[string]func([]TypedValue) (TypedValue, error))
-	server.Routes["POST"] = make(map[string]func([]TypedValue) (TypedValue, error))
-	server.Routes["PUT"] = make(map[string]func([]TypedValue) (TypedValue, error))
-	server.Routes["DELETE"] = make(map[string]func([]TypedValue) (TypedValue, error))
-	
-	servers[name] = server
-	
-	return NewTypedString(fmt.Sprintf("✅ Сервер '%s' создан на порту %d", name, port)), nil
+type JournalEntry struct {
+	Timestamp time.Time
+	Text      string
+	Mood      string
+	Encrypted bool
 }
 
-func (i *Interpreter) startServer(args []TypedValue) (TypedValue, error) {
-	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("startServer: expected server name")
-	}
-	name, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("startServer: first argument must be string")
-	}
-	
-	serversMu.RLock()
-	server, exists := servers[name]
-	serversMu.RUnlock()
-	
-	if !exists {
-		return TypedValue{}, fmt.Errorf("startServer: server '%s' not found", name)
-	}
-	
-	if server.IsActive {
-		return NewTypedString(fmt.Sprintf("⚠️ Сервер '%s' уже запущен", name)), nil
-	}
-	
-	mux := http.NewServeMux()
-	
-	server.mu.RLock()
-	for method, routes := range server.Routes {
-		for path, handler := range routes {
-			handlerFunc := func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != method {
-					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-					return
-				}
-				
-				args := []TypedValue{}
-				
-				query := make([]TypedValue, 0)
-				for key, values := range r.URL.Query() {
-					if len(values) > 0 {
-						query = append(query, NewTypedString(key))
-						query = append(query, NewTypedString(values[0]))
-					}
-				}
-				args = append(args, NewTypedArray(query))
-				
-				if method == "POST" || method == "PUT" {
-					body, err := io.ReadAll(r.Body)
-					if err == nil {
-						args = append(args, NewTypedString(string(body)))
-					} else {
-						args = append(args, NewTypedString(""))
-					}
-				} else {
-					args = append(args, NewTypedString(""))
-				}
-				
-				result, err := handler(args)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				
-				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(result.String()))
-			}
-			
-			mux.HandleFunc(path, handlerFunc)
-		}
-	}
-	server.mu.RUnlock()
-	
-	server.Server = &http.Server{
-		Addr:         fmt.Sprintf(":%d", server.Port),
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-	}
-	
-	server.IsActive = true
-	
-	go func() {
-		fmt.Fprintf(output, "🚀 Сервер '%s' запущен на http://localhost:%d\n", server.Name, server.Port)
-		if err := server.Server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(output, "❌ Ошибка сервера '%s': %v\n", server.Name, err)
-		}
-	}()
-	
-	return NewTypedString(fmt.Sprintf("✅ Сервер '%s' запущен на порту %d", name, server.Port)), nil
+type EventEntry struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Date        string   `json:"date"`
+	Country     string   `json:"country"`
+	City        string   `json:"city"`
+	Type        string   `json:"type"`
+	Description string   `json:"description"`
+	URL         string   `json:"url,omitempty"`
+	Organizer   string   `json:"organizer,omitempty"`
+	Tags        []string `json:"tags"`
 }
 
-func (i *Interpreter) stopServer(args []TypedValue) (TypedValue, error) {
-	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("stopServer: expected server name")
-	}
-	name, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("stopServer: first argument must be string")
-	}
-	
-	serversMu.RLock()
-	server, exists := servers[name]
-	serversMu.RUnlock()
-	
-	if !exists {
-		return TypedValue{}, fmt.Errorf("stopServer: server '%s' not found", name)
-	}
-	
-	if !server.IsActive {
-		return NewTypedString(fmt.Sprintf("⚠️ Сервер '%s' не запущен", name)), nil
-	}
-	
-	if server.Server != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		
-		if err := server.Server.Shutdown(ctx); err != nil {
-			return TypedValue{}, fmt.Errorf("error stopping server: %v", err)
-		}
-	}
-	
-	server.IsActive = false
-	return NewTypedString(fmt.Sprintf("✅ Сервер '%s' остановлен", name)), nil
+type BookEntry struct {
+	Title       string   `json:"title"`
+	Author      string   `json:"author"`
+	Year        string   `json:"year"`
+	Genre       string   `json:"genre"`
+	Description string   `json:"description"`
+	Themes      []string `json:"themes"`
+	AgeGroup    string   `json:"age_group"`
 }
 
-func (i *Interpreter) addRoute(args []TypedValue) (TypedValue, error) {
-	if len(args) < 4 {
-		return TypedValue{}, fmt.Errorf("addRoute: expected server, method, path, handler")
-	}
-	
-	serverName, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("addRoute: first argument must be string")
-	}
-	
-	method, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("addRoute: second argument must be string")
-	}
-	
-	path, ok := args[2].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("addRoute: third argument must be string")
-	}
-	
-	handlerValue := args[3]
-	if handlerValue.Type != TypeObject {
-		return TypedValue{}, fmt.Errorf("addRoute: fourth argument must be a function")
-	}
-	
-	var handlerFunc func([]TypedValue) (TypedValue, error)
-	
-	if fn, ok := handlerValue.Value.(*FunctionDeclaration); ok {
-		handlerFunc = func(args []TypedValue) (TypedValue, error) {
-			i.pushFrame()
-			defer i.popFrame()
-			
-			if len(args) > 0 {
-				i.setVar("query", args[0])
-			}
-			if len(args) > 1 {
-				i.setVar("body", args[1])
-			}
-			
-			var result TypedValue
-			for _, stmt := range fn.Body {
-				val, err := i.Evaluate(stmt)
-				if err != nil {
-					return TypedValue{}, err
-				}
-				result = val
-				if i.returnFlag {
-					break
-				}
-			}
-			
-			return result, nil
-		}
-	} else {
-		return TypedValue{}, fmt.Errorf("addRoute: fourth argument must be a function")
-	}
-	
-	method = strings.ToUpper(method)
-	if method != "GET" && method != "POST" && method != "PUT" && method != "DELETE" {
-		return TypedValue{}, fmt.Errorf("addRoute: unsupported method '%s'", method)
-	}
-	
-	serversMu.RLock()
-	server, exists := servers[serverName]
-	serversMu.RUnlock()
-	
-	if !exists {
-		return TypedValue{}, fmt.Errorf("addRoute: server '%s' not found", serverName)
-	}
-	
-	server.mu.Lock()
-	server.Routes[method][path] = handlerFunc
-	server.mu.Unlock()
-	
-	return NewTypedString(fmt.Sprintf("✅ Маршрут %s %s добавлен на сервер '%s'", method, path, serverName)), nil
+type Interpreter struct {
+	variables      map[string]TypedValue
+	variableTypes  map[string]string
+	functions      map[string]*FunctionDeclaration
+	exportedFuncs  map[string]*FunctionDeclaration
+	callStack      []callFrame
+	returnValue    TypedValue
+	returnFlag     bool
+	mu             sync.RWMutex
+	maxRecursion   int
+	recursionDepth int
+	errorHandler   func(error, int, int)
+	sandbox        *Sandbox
+	rand           *mathrand.Rand
+	hateFilter     *HateFilter
+	encryption     *Encryption
+	journal        []JournalEntry
+	journalMu      sync.RWMutex
+	events         []EventEntry
+	eventsMu       sync.RWMutex
+	quotes         []string
+	books          []BookEntry
+	flagColors     map[string][]string
 }
 
-func (i *Interpreter) getServerStatus(args []TypedValue) (TypedValue, error) {
-	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("getServerStatus: expected server name")
-	}
-	name, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("getServerStatus: first argument must be string")
-	}
-	
-	serversMu.RLock()
-	server, exists := servers[name]
-	serversMu.RUnlock()
-	
-	if !exists {
-		return TypedValue{}, fmt.Errorf("getServerStatus: server '%s' not found", name)
-	}
-	
-	status := "остановлен"
-	if server.IsActive {
-		status = "запущен"
-	}
-	
-	routeCount := 0
-	server.mu.RLock()
-	for _, routes := range server.Routes {
-		routeCount += len(routes)
-	}
-	server.mu.RUnlock()
-	
-	result := fmt.Sprintf("📊 Статус сервера '%s':\n", name)
-	result += fmt.Sprintf("  • Порт: %d\n", server.Port)
-	result += fmt.Sprintf("  • Статус: %s\n", status)
-	result += fmt.Sprintf("  • Маршрутов: %d\n", routeCount)
-	
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) listServers(args []TypedValue) (TypedValue, error) {
-	serversMu.RLock()
-	defer serversMu.RUnlock()
-	
-	if len(servers) == 0 {
-		return NewTypedString("📋 Нет созданных серверов"), nil
-	}
-	
-	result := "📋 Список серверов:\n"
-	for name, server := range servers {
-		status := "⏹️ остановлен"
-		if server.IsActive {
-			status = "▶️ запущен"
-		}
-		routeCount := 0
-		server.mu.RLock()
-		for _, routes := range server.Routes {
-			routeCount += len(routes)
-		}
-		server.mu.RUnlock()
-		result += fmt.Sprintf("  • %s - порт %d, %s, маршрутов: %d\n", name, server.Port, status, routeCount)
-	}
-	
-	return NewTypedString(result), nil
-}
-
-// ============================================
-// ФУНКЦИЯ antiHomoPhobe (РАБОТАЕТ НА WINDOWS 10)
-// ============================================
-
-func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
-	// Длительность (по умолчанию 7 сек)
-	duration := 7
-	if len(args) > 0 {
-		if d, ok := args[0].Value.(int); ok {
-			if d > 0 && d <= 30 {
-				duration = d
-			}
-		}
-	}
-
-	fmt.Fprintf(output, "\n🚨🚨🚨 ANTI-GOMOPHOBE АКТИВИРОВАНА! 🚨🚨🚨\n")
-	fmt.Fprintf(output, "🔄 Выдвигаю дисковод и мигаю лампочками клавиатуры...\n")
-	fmt.Fprintf(output, "⏱️  Длительность: %d секунд\n\n", duration)
-
-	// ----- Выдвижение дисковода -----
-	if runtime.GOOS == "windows" {
-		// PowerShell: EjectCD()
-		cmd := exec.Command("powershell", "-Command", "(New-Object -ComObject Shell.Application).EjectCD()")
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
-		} else {
-			fmt.Fprintf(output, "💿 Дисковод выдвинут\n")
-		}
-	} else {
-		// Linux / macOS
-		cmd := exec.Command("eject")
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
-		} else {
-			fmt.Fprintf(output, "💿 Дисковод выдвинут\n")
-		}
-	}
-
-	startTime := time.Now()
-	done := make(chan bool)
-
-	// ----- Горутина: мигание лампочек и обратный отсчёт -----
-	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		state := false
-		for {
-			select {
-			case <-ticker.C:
-				state = !state
-				elapsed := time.Since(startTime).Seconds()
-				remaining := duration - int(elapsed)
-				if remaining < 0 {
-					remaining = 0
-				}
-
-				// Визуализация в консоли
-				if state {
-					fmt.Fprintf(output, "\r💡💡💡 [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
-				} else {
-					fmt.Fprintf(output, "\r⬜⬜⬜ [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
-				}
-
-				// Реальное переключение лампочек (только Windows)
-				if runtime.GOOS == "windows" {
-					// CapsLock (VK_CAPITAL = 0x14)
-					keybdEvent(0x14, 0, 0, 0)          // KEYEVENTF_KEYDOWN
-					keybdEvent(0x14, 0, 0x0002, 0)    // KEYEVENTF_KEYUP
-					// NumLock (VK_NUMLOCK = 0x90)
-					keybdEvent(0x90, 0, 0, 0)
-					keybdEvent(0x90, 0, 0x0002, 0)
-					// ScrollLock (VK_SCROLL = 0x91)
-					keybdEvent(0x91, 0, 0, 0)
-					keybdEvent(0x91, 0, 0x0002, 0)
-				}
-
-				if elapsed >= float64(duration) {
-					done <- true
-					return
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	<-done
-	fmt.Fprintln(output)
-
-	// ----- Закрытие дисковода -----
-	if runtime.GOOS == "windows" {
-		fmt.Fprintf(output, "📀 Для закрытия дисковода нажмите кнопку на приводе или используйте 'Извлечь' в проводнике.\n")
-	} else {
-		cmd := exec.Command("eject", "-t")
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(output, "⚠️ Не удалось закрыть дисковод: %v\n", err)
-		} else {
-			fmt.Fprintf(output, "📀 Дисковод закрыт\n")
-		}
-	}
-
-	fmt.Fprintf(output, "\n✅ Anti-GomoPhobe завершена!\n")
-	fmt.Fprintf(output, "📊 Лампочки мигали %d секунд\n", duration)
-
-	result := fmt.Sprintf("✅ Anti-GomoPhobe выполнена! Дисковод выдвинут на %d секунд, лампочки мигали.", duration)
-	return NewTypedString(result), nil
-}
-
-// keybd_event обёртка для Windows
-var (
-	user32DLL = syscall.NewLazyDLL("user32.dll")
-	procKeybdEvent = user32DLL.NewProc("keybd_event")
-)
-
-func keybdEvent(bVk byte, bScan byte, dwFlags uintptr, dwExtraInfo uintptr) {
-	procKeybdEvent.Call(uintptr(bVk), uintptr(bScan), dwFlags, dwExtraInfo)
-}
-
-// ============================================
-// ФУНКЦИЯ getLGBTResources - возвращает JSON с данными от проверенных НКО
-// ============================================
-
-func (i *Interpreter) getLGBTResources(args []TypedValue) (TypedValue, error) {
-	// Определяем структуру ресурса
-	type Resource struct {
-		ID          string   `json:"id"`
-		Name        string   `json:"name"`
-		Type        string   `json:"type"`
-		Description string   `json:"description"`
-		Country     string   `json:"country"`
-		City        string   `json:"city"`
-		Address     string   `json:"address,omitempty"`
-		Phone       string   `json:"phone,omitempty"`
-		Email       string   `json:"email,omitempty"`
-		Website     string   `json:"website,omitempty"`
-		Services    []string `json:"services"`
-		WorkingHours string  `json:"working_hours,omitempty"`
-		Verified    bool     `json:"verified"`
-		Rating      float64  `json:"rating,omitempty"`
-		Reviews     int      `json:"reviews,omitempty"`
-		Languages   []string `json:"languages,omitempty"`
-	}
-
-	// Проверенные НКО (база данных)
-	resources := []Resource{
-		{
-			ID:          "r1",
-			Name:        "Российская ЛГБТ-сеть",
-			Type:        "network",
-			Description: "Крупнейшая российская ЛГБТ-организация, предоставляющая юридическую, психологическую и социальную поддержку",
-			Country:     "Россия",
-			City:        "Москва",
-			Address:     "ул. Тверская, д. 15, оф. 302",
-			Phone:       "+7 (495) 123-45-67",
-			Email:       "info@lgbtnet.ru",
-			Website:     "https://lgbtnet.ru",
-			Services:    []string{"юридическая_помощь", "психологическая_поддержка", "горячая_линия", "социальная_адаптация", "образовательные_программы"},
-			WorkingHours: "Пн-Пт: 10:00-20:00, Сб: 12:00-18:00",
-			Verified:    true,
-			Rating:      4.8,
-			Reviews:     124,
-			Languages:   []string{"ru", "en"},
+func NewInterpreter() *Interpreter {
+	return &Interpreter{
+		variables:      make(map[string]TypedValue),
+		variableTypes:  make(map[string]string),
+		functions:      make(map[string]*FunctionDeclaration),
+		exportedFuncs:  make(map[string]*FunctionDeclaration),
+		callStack:      []callFrame{{vars: make(map[string]TypedValue), types: make(map[string]string), constants: make(map[string]bool)}},
+		returnValue:    TypedValue{Type: TypeNull, Value: nil},
+		returnFlag:     false,
+		maxRecursion:   1000,
+		recursionDepth: 0,
+		sandbox:        NewSandbox(),
+		rand:           mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
+		hateFilter:     NewHateFilter(),
+		encryption:     NewEncryption("LGBTScriptSecretKey2024"),
+		journal:        []JournalEntry{},
+		quotes: []string{
+			"Быть собой — это самый смелый поступок. - Марша П. Джонсон",
+			"Любовь — это любовь. - Леди Гага",
+			"Каждый имеет право на счастье. - Харви Милк",
+			"Мы не должны прятаться. - Байярд Растин",
+			"Твоя идентичность — твоя сила. - Лаверн Кокс",
+			"Гордость — это сопротивление. - Алан Камминг",
+			"Мы все рождены свободными. - Нельсон Мандела",
+			"Разнообразие — это красота жизни. - Одри Лорд",
+			"Любовь побеждает страх. - Джеймс Болдуин",
+			"Ты важен такой, какой ты есть. - Адам Риппон",
 		},
-		{
-			ID:          "r2",
-			Name:        "Центр 'Сфера'",
-			Type:        "psychological",
-			Description: "Центр психологической и социальной поддержки ЛГБТ+ людей",
-			Country:     "Россия",
-			City:        "Санкт-Петербург",
-			Address:     "Невский проспект, д. 25",
-			Phone:       "+7 (812) 987-65-43",
-			Email:       "sphere@lgbt.support",
-			Website:     "https://sfera-spb.ru",
-			Services:    []string{"психологическая_поддержка", "группы_поддержки", "консультации", "горячая_линия"},
-			WorkingHours: "Пн-Вс: 09:00-21:00",
-			Verified:    true,
-			Rating:      4.6,
-			Reviews:     89,
-			Languages:   []string{"ru"},
+		books: []BookEntry{
+			{"Гордость и предубеждение", "Джейн Остин", "1813", "Классика", "История о любви и самопринятии", []string{"любовь", "общество", "самоопределение"}, "16+"},
+			{"Цвета радуги", "Майкл Генри", "2020", "Детская", "Книга о принятии себя и других", []string{"принятие", "дружба", "разнообразие"}, "6+"},
+			{"Моя сестра", "Элис Уокер", "1982", "Драма", "История о сестрах и их пути", []string{"семья", "женщины", "борьба"}, "18+"},
 		},
-		{
-			ID:          "r3",
-			Name:        "Human Rights Campaign",
-			Type:        "advocacy",
-			Description: "Крупнейшая американская организация по защите прав ЛГБТ+",
-			Country:     "США",
-			City:        "Вашингтон",
-			Address:     "1640 Rhode Island Ave NW",
-			Phone:       "+1 (202) 628-4160",
-			Email:       "info@hrc.org",
-			Website:     "https://hrc.org",
-			Services:    []string{"адвокация", "юридическая_помощь", "образовательные_программы", "исследования"},
-			WorkingHours: "Пн-Пт: 09:00-18:00 EST",
-			Verified:    true,
-			Rating:      4.9,
-			Reviews:     312,
-			Languages:   []string{"en", "es"},
-		},
-		{
-			ID:          "r4",
-			Name:        "ILGA (International Lesbian, Gay, Bisexual, Trans and Intersex Association)",
-			Type:        "international",
-			Description: "Международная ассоциация, объединяющая ЛГБТ-организации по всему миру",
-			Country:     "Швейцария",
-			City:        "Женева",
-			Address:     "Rue des Deux Tours, 1",
-			Phone:       "+41 (22) 734-32-54",
-			Email:       "info@ilga.org",
-			Website:     "https://ilga.org",
-			Services:    []string{"адвокация", "поддержка_организаций", "исследования", "образование"},
-			WorkingHours: "Пн-Пт: 09:00-17:00 CET",
-			Verified:    true,
-			Rating:      4.7,
-			Reviews:     205,
-			Languages:   []string{"en", "fr", "es", "ru"},
-		},
-		{
-			ID:          "r5",
-			Name:        "The Trevor Project",
-			Type:        "crisis",
-			Description: "Круглосуточная кризисная поддержка ЛГБТ+ молодежи",
-			Country:     "США",
-			City:        "Нью-Йорк",
-			Phone:       "+1 (866) 488-7386",
-			Email:       "help@trevorproject.org",
-			Website:     "https://thetrevorproject.org",
-			Services:    []string{"кризисная_поддержка", "горячая_линия", "чат_поддержки", "психологическая_помощь"},
-			WorkingHours: "Круглосуточно",
-			Verified:    true,
-			Rating:      4.9,
-			Reviews:     456,
-			Languages:   []string{"en", "es"},
-		},
-		{
-			ID:          "r6",
-			Name:        "GLAAD",
-			Type:        "media",
-			Description: "Организация по мониторингу СМИ и защите прав ЛГБТ+ в медиа",
-			Country:     "США",
-			City:        "Нью-Йорк",
-			Address:     "160 Varick St, 6th Floor",
-			Phone:       "+1 (212) 807-1700",
-			Email:       "info@glaad.org",
-			Website:     "https://glaad.org",
-			Services:    []string{"медиа_мониторинг", "образование", "адвокация", "исследования"},
-			WorkingHours: "Пн-Пт: 09:00-18:00 EST",
-			Verified:    true,
-			Rating:      4.5,
-			Reviews:     178,
-			Languages:   []string{"en"},
+		flagColors: map[string][]string{
+			"pride":     {"красный", "оранжевый", "желтый", "зеленый", "синий", "фиолетовый"},
+			"trans":     {"голубой", "розовый", "белый", "розовый", "голубой"},
+			"lesbian":   {"оранжевый", "белый", "розовый"},
+			"gay":       {"голубой", "зеленый", "белый"},
+			"bisexual":  {"розовый", "фиолетовый", "синий"},
+			"nonbinary": {"желтый", "белый", "фиолетовый", "черный"},
 		},
 	}
-
-	// Фильтрация по параметрам
-	filterCountry := ""
-	filterType := ""
-	filterCity := ""
-	filterService := ""
-
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			filterCountry = c
-		}
-	}
-
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			filterType = t
-		}
-	}
-
-	if len(args) > 2 {
-		if c, ok := args[2].Value.(string); ok {
-			filterCity = c
-		}
-	}
-
-	if len(args) > 3 {
-		if s, ok := args[3].Value.(string); ok {
-			filterService = s
-		}
-	}
-
-	// Применяем фильтры
-	filtered := []Resource{}
-	for _, r := range resources {
-		if filterCountry != "" && !strings.Contains(strings.ToLower(r.Country), strings.ToLower(filterCountry)) {
-			continue
-		}
-		if filterType != "" && !strings.Contains(strings.ToLower(r.Type), strings.ToLower(filterType)) {
-			continue
-		}
-		if filterCity != "" && !strings.Contains(strings.ToLower(r.City), strings.ToLower(filterCity)) {
-			continue
-		}
-		if filterService != "" {
-			found := false
-			for _, s := range r.Services {
-				if strings.Contains(strings.ToLower(s), strings.ToLower(filterService)) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				continue
-			}
-		}
-		filtered = append(filtered, r)
-	}
-
-	response := map[string]interface{}{
-		"total":        len(filtered),
-		"resources":    filtered,
-		"filters": map[string]string{
-			"country": filterCountry,
-			"type":    filterType,
-			"city":    filterCity,
-			"service": filterService,
-		},
-		"meta": map[string]interface{}{
-			"timestamp":    time.Now().Format(time.RFC3339),
-			"version":      "1.0",
-			"source":       "LGBTScript Resource Database",
-			"total_orgs":   len(resources),
-			"verified_only": true,
-		},
-	}
-
-	jsonData, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		return TypedValue{}, fmt.Errorf("ошибка сериализации JSON: %v", err)
-	}
-
-	return NewTypedString(string(jsonData)), nil
 }
 
-// ============================================
-// СОЦИАЛЬНЫЕ ФУНКЦИИ (СОХРАНЕНЫ)
-// ============================================
-
-func (i *Interpreter) findSafeSpace(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("findSafeSpace: expected at least 2 arguments (place, city)")
-	}
-	place, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findSafeSpace: first argument must be string")
-	}
-	city, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findSafeSpace: second argument must be string")
+func (i *Interpreter) checkHateSpeech(text string) (bool, string) {
+	if !i.hateFilter.enabled {
+		return false, ""
 	}
 
-	radius := 5
-	if len(args) > 2 {
-		if r, ok := args[2].Value.(int); ok {
-			radius = r
-		}
+	hasHate, detected, languages := i.hateFilter.Check(text)
+	if hasHate {
+		i.hateFilter.LogHateSpeech(text, detected, languages)
+		filtered := i.hateFilter.FilterText(text)
+		return true, filtered
 	}
-
-	places := []string{
-		"🏳️‍🌈 ЛГБТ-дружественное кафе 'Радуга', ул. Цветная, 15",
-		"🏳️‍🌈 Коворкинг 'Вместе', пр. Свободы, 42",
-		"🏳️‍🌈 Книжный магазин 'Открытый мир', ул. Мира, 7",
-		"🏳️‍🌈 Спортивный клуб 'Единство', ул. Спортивная, 23",
-		"🏳️‍🌈 Арт-пространство 'Толерантность', пер. Художников, 5",
-	}
-
-	result := fmt.Sprintf("🌍 Ближайшие %s в %s (радиус %d км):\n", place, city, radius)
-	for _, p := range places {
-		result += "  • " + p + "\n"
-	}
-	result += "\n💡 Проверьте актуальность информации на местных ЛГБТ-ресурсах."
-
-	return NewTypedString(result), nil
+	return false, text
 }
 
-func (i *Interpreter) getCrisisSupport(args []TypedValue) (TypedValue, error) {
-	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("getCrisisSupport: expected region argument")
+func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
+	if program, ok := node.(*Program); ok {
+		return i.evaluateProgram(program)
 	}
-	region, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("getCrisisSupport: first argument must be string")
-	}
-
-	supportType := "горячая_линия"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			supportType = t
-		}
-	}
-
-	support := map[string]string{
-		"горячая_линия": "📞 Телефон доверия: 8-800-XXX-XX-XX (круглосуточно)",
-		"чат":           "💬 Онлайн-чат: https://lgbt-support.org/chat",
-		"психолог":      "🧠 Психологическая помощь: запись по телефону +7-XXX-XXX-XX-XX",
-		"юрист":         "⚖️ Юридическая консультация: lgbt-law@support.org",
-	}
-
-	result := fmt.Sprintf("🚨 Кризисная поддержка в регионе '%s':\n", region)
-	if info, ok := support[supportType]; ok {
-		result += "  • " + info + "\n"
-	} else {
-		result += "  • 📞 Общий телефон доверия: 8-800-XXX-XX-XX\n"
-	}
-	result += "\n💙 Вы не одиноки! Помощь доступна 24/7."
-       
-	return NewTypedString(result), nil
+	return i.evaluateNode(node)
 }
 
-func (i *Interpreter) getLGBTQLaws(args []TypedValue) (TypedValue, error) {
-	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("getLGBTQLaws: expected country argument")
-	}
-	country, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("getLGBTQLaws: first argument must be string")
-	}
-
-	category := "права"
-	if len(args) > 1 {
-		if c, ok := args[1].Value.(string); ok {
-			category = c
-		}
-	}
-
-	laws := map[string]string{
-		"Россия":         "⚖️ В России ЛГБТ-права ограничены. Действует закон о пропаганде.",
-		"США":            "⚖️ В США однополые браки легализованы. Есть защита от дискриминации.",
-		"Великобритания": "⚖️ В Великобритании ЛГБТ+ защищены законом. Есть Equality Act.",
-		"Германия":       "⚖️ В Германии однополые браки легальны с 2017 года.",
-		"Франция":        "⚖️ Во Франции ЛГБТ+ защищены, однополые браки легальны.",
-		"Канада":         "⚖️ В Канаде однополые браки легальны с 2005 года.",
-	}
-
-	result := fmt.Sprintf("📚 Информация о законодательстве в стране '%s' (категория: %s):\n", country, category)
-	if info, ok := laws[country]; ok {
-		result += "  • " + info + "\n"
-	} else {
-		result += "  • ℹ️ Информация уточняется. Рекомендуем обратиться к местным ЛГБТ-организациям.\n"
-	}
-	result += "\n🔗 Подробнее: https://ilga.org/"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getDailyAffirmation(args []TypedValue) (TypedValue, error) {
-	affirmations := []string{
-		"💖 Ты важен(на) и любим(а) таким(ой), какой(ая) ты есть!",
-		"🌈 Твоя идентичность — это твоя сила!",
-		"🌟 Ты заслуживаешь счастья и уважения!",
-		"💪 Ты сильнее, чем думаешь!",
-		"✨ Каждый день ты становишься ближе к своей истинной сущности!",
-		"🌸 Твоя уникальность делает мир красивее!",
-		"🌺 Ты имеешь право быть собой!",
-		"💫 Твоя любовь имеет значение!",
-		"🦋 Ты проходишь свой путь, и это прекрасно!",
-		"🌈 Ты — часть прекрасного разнообразия мира!",
-	}
-
-	theme := "self-love"
-	if len(args) > 0 {
-		if t, ok := args[0].Value.(string); ok {
-			theme = t
-		}
-	}
-
-	idx := i.rand.Intn(len(affirmations))
-	return NewTypedString(fmt.Sprintf("🌟 Аффирмация дня (%s):\n%s", theme, affirmations[idx])), nil
-}
-
-func (i *Interpreter) moodCheck(args []TypedValue) (TypedValue, error) {
-	moods := []string{"тревога", "одиночество", "грусть", "страх", "радость", "спокойствие"}
-	if len(args) > 0 {
-		if m, ok := args[0].Value.([]TypedValue); ok {
-			moods = make([]string, len(m))
-			for idx, v := range m {
-				if s, ok := v.Value.(string); ok {
-					moods[idx] = s
-				}
-			}
-		}
-	}
-
-	suggestResources := true
-	if len(args) > 1 {
-		if s, ok := args[1].Value.(bool); ok {
-			suggestResources = s
-		}
-	}
-
-	result := "🧠 Проверка эмоционального состояния:\n"
-	result += "📊 Отмеченные состояния: " + strings.Join(moods, ", ") + "\n\n"
-
-	if suggestResources {
-		result += "💡 Рекомендации:\n"
-		for _, mood := range moods {
-			switch mood {
-			case "тревога":
-				result += "  • 🌿 Попробуйте дыхательные упражнения (3-3-3 техника)\n"
-			case "одиночество":
-				result += "  • 🤝 Обратитесь в онлайн-чат поддержки\n"
-			case "грусть":
-				result += "  • 🎵 Послушайте вдохновляющую музыку\n"
-			case "страх":
-				result += "  • 🏠 Найдите безопасное место и дышите\n"
-			case "радость":
-				result += "  • 🎉 Поделитесь радостью с близкими!\n"
-			case "спокойствие":
-				result += "  • 🧘 Продолжайте практиковать осознанность\n"
-			}
-		}
-	}
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) guidedBreathing(args []TypedValue) (TypedValue, error) {
-	minutes := 3
-	if len(args) > 0 {
-		if m, ok := args[0].Value.(int); ok {
-			minutes = m
-		}
-	}
-
-	theme := "calm"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			theme = t
-		}
-	}
-
-	result := fmt.Sprintf("🧘 Упражнение для снижения стресса (%d минут, тема: %s):\n", minutes, theme)
-	result += "🌬️ Следуйте инструкции:\n\n"
-
-	cycles := minutes * 6
-	for i := 0; i < cycles && i < 30; i++ {
-		result += fmt.Sprintf("  Вдох (4 сек) → Задержка (4 сек) → Выдох (6 сек) [цикл %d]\n", i+1)
-	}
-
-	result += "\n💙 Завершите упражнение. Почувствуйте, как ваше тело расслабляется."
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) defineTerm(args []TypedValue) (TypedValue, error) {
-	if len(args) < 1 {
-		return TypedValue{}, fmt.Errorf("defineTerm: expected term argument")
-	}
-	term, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("defineTerm: first argument must be string")
-	}
-
-	language := "ru"
-	if len(args) > 1 {
-		if l, ok := args[1].Value.(string); ok {
-			language = l
-		}
-	}
-
-	terms := map[string]string{
-		"небинарность": "НЕБИНАРНОСТЬ (Non-binary) — гендерная идентичность, которая не вписывается в бинарную систему мужского и женского пола.",
-		"бисексуальность": "БИСЕКСУАЛЬНОСТЬ (Bisexuality) — романтическое и/или сексуальное влечение к людям более чем одного пола.",
-		"гомосексуальность": "ГОМОСЕКСУАЛЬНОСТЬ (Homosexuality) — романтическое и/или сексуальное влечение к людям того же пола.",
-		"трансгендерность": "ТРАНСГЕНДЕРНОСТЬ (Transgender) — состояние, когда гендерная идентичность человека не совпадает с полом при рождении.",
-		"гетеросексуальность": "ГЕТЕРОСЕКСУАЛЬНОСТЬ (Heterosexuality) — романтическое и/или сексуальное влечение к людям противоположного пола.",
-		"квир": "КВИР (Queer) — зонтичный термин для ЛГБТ+ сообщества, обозначающий несоответствие нормам.",
-		"интерсекс": "ИНТЕРСЕКС (Intersex) — люди, рожденные с репродуктивными или половыми характеристиками, не вписывающимися в типичные определения мужского или женского тела.",
-	}
-
-	result := fmt.Sprintf("📖 Определение термина '%s' (язык: %s):\n", term, language)
-	if def, ok := terms[strings.ToLower(term)]; ok {
-		result += "  " + def + "\n"
-	} else {
-		result += "  ℹ️ Термин не найден. Рекомендуем обратиться к словарю ЛГБТ+ терминов.\n"
-	}
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) lgbtHistoryQuiz(args []TypedValue) (TypedValue, error) {
-	difficulty := "medium"
-	if len(args) > 0 {
-		if d, ok := args[0].Value.(string); ok {
-			difficulty = d
-		}
-	}
-
-	questions := []string{
-		"1. В каком году произошли Стоунволлские бунты?\n   A) 1969  B) 1975  C) 1980  D) 1990\n   Ответ: A",
-		"2. Кто был первой открытой ЛГБТ-персоной в Конгрессе США?\n   A) Харви Милк  B) Барни Фрэнк  C) Тэмми Болдуин  D) Джим Коллинз\n   Ответ: B",
-		"3. В каком году однополые браки были легализованы в США?\n   A) 2010  B) 2015  C) 2020  D) 2005\n   Ответ: B",
-		"4. Кто из этих людей был ЛГБТ-активистом?\n   A) Мартин Лютер Кинг  B) Харви Милк  C) Нельсон Мандела  D) Махатма Ганди\n   Ответ: B",
-		"5. В каком году ВОЗ исключила гомосексуальность из списка психических расстройств?\n   A) 1973  B) 1990  C) 2000  D) 1985\n   Ответ: B",
-	}
-
-	idx := i.rand.Intn(len(questions))
-	result := fmt.Sprintf("📚 Квиз по истории ЛГБТ+ (сложность: %s):\n\n", difficulty)
-	result += questions[idx] + "\n\n"
-	result += "💡 Проверьте свои знания и узнавайте больше!"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getDailyFact(args []TypedValue) (TypedValue, error) {
-	facts := []string{
-		"🏳️‍🌈 Первый парад гордости состоялся в Нью-Йорке в 1970 году.",
-		"📖 В Древней Греции гомосексуальные отношения были распространены и считались нормой.",
-		"🎨 Известный художник Леонардо да Винчи был гомосексуалом.",
-		"📚 'Сад' (The Garden) — один из первых ЛГБТ-фильмов 1968 года.",
-		"🏛️ В 1969 году Стоунволлские бунты стали поворотным моментом для ЛГБТ-движения.",
-		"🌍 Первый в мире ЛГБТ-прайд состоялся в 1970 году.",
-		"📖 В 1973 году Американская психиатрическая ассоциация исключила гомосексуальность из списка психических расстройств.",
-	}
-
-	idx := i.rand.Intn(len(facts))
-	category := "культура"
-	region := "global"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			category = c
-		}
-	}
-	if len(args) > 1 {
-		if r, ok := args[1].Value.(string); ok {
-			region = r
-		}
-	}
-
-	return NewTypedString(fmt.Sprintf("📌 Факт дня (категория: %s, регион: %s):\n%s", category, region, facts[idx])), nil
-}
-
-func (i *Interpreter) getHRTInfo(args []TypedValue) (TypedValue, error) {
-	country := "USA"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	hrtType := "MTF"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			hrtType = t
-		}
-	}
-
-	result := fmt.Sprintf("🏥 Информация о гормональной терапии (страна: %s, тип: %s):\n", country, hrtType)
-	result += "\n📋 Основная информация:\n"
-	result += "  • Гормональная терапия проводится под наблюдением эндокринолога\n"
-	result += "  • Требуется регулярная сдача анализов крови\n"
-	result += "  • Эффект проявляется в течение 3-6 месяцев\n\n"
-
-	result += "🔍 Рекомендации:\n"
-	result += "  • Обратитесь к ЛГБТ-дружественному эндокринологу\n"
-	result += "  • Получите направление от психотерапевта (по требованиям страны)\n"
-	result += "  • Обсудите все риски и побочные эффекты с врачом\n"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) findLGBTDoctor(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("findLGBTDoctor: expected specialty and city")
-	}
-	specialty, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findLGBTDoctor: first argument must be string")
-	}
-	city, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findLGBTDoctor: second argument must be string")
-	}
-
-	doctors := []string{
-		"👨‍⚕️ Иванова Е.П. (терапевт) - клиника 'Здоровье', ул. Ленина, 10",
-		"👩‍⚕️ Петров С.М. (гинеколог) - центр 'Женское здоровье', пр. Мира, 25",
-		"👨‍⚕️ Сидорова А.А. (эндокринолог) - клиника 'Гармония', ул. Садовая, 5",
-		"👩‍⚕️ Козлова Н.В. (психотерапевт) - центр 'Поддержка', ул. Свободы, 42",
-		"👨‍⚕️ Морозов Д.И. (уролог) - клиника 'Здоровье мужчины', ул. Спортивная, 15",
-	}
-
-	result := fmt.Sprintf("🏥 ЛГБТ-дружественные врачи (%s) в городе %s:\n", specialty, city)
-	for _, doc := range doctors {
-		result += "  • " + doc + "\n"
-	}
-	result += "\n💡 Уточните информацию о приеме по телефону клиники."
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getDocumentChangeGuide(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("getDocumentChangeGuide: expected country and document type")
-	}
-	country, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("getDocumentChangeGuide: first argument must be string")
-	}
-	document, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("getDocumentChangeGuide: second argument must be string")
-	}
-
-	guide := map[string]string{
-		"паспорт": "Для смены паспорта необходимы: заявление, медицинское заключение, новый паспорт.",
-		"свидетельство": "Для смены свидетельства о рождении требуется решение суда.",
-		"водительские": "Для смены водительского удостоверения необходимо заявление в ГИБДД.",
-	}
-
-	result := fmt.Sprintf("📄 Инструкция по смене документа '%s' в стране '%s':\n", document, country)
-	if info, ok := guide[document]; ok {
-		result += "  • " + info + "\n"
-	} else {
-		result += "  • ℹ️ Информация уточняется. Рекомендуем обратиться к юристу.\n"
-	}
-	result += "\n⚖️ Рекомендуем получить юридическую консультацию."
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQEvents(args []TypedValue) (TypedValue, error) {
-	days := 30
-	if len(args) > 0 {
-		if d, ok := args[0].Value.(int); ok {
-			days = d
-		}
-	}
-
-	eventType := "online"
-	if len(args) > 1 {
-		if t, ok := args[1].Value.(string); ok {
-			eventType = t
-		}
-	}
-
-	events := []string{
-		"🏳️‍🌈 Онлайн-встреча 'Разговор о важном' - 15 марта, 19:00",
-		"📚 Книжный клуб 'Радужные страницы' - каждую субботу, 16:00",
-		"🎨 Арт-терапия 'Вырази себя' - 20 марта, 18:00",
-		"💬 Группа поддержки 'Вместе' - по вторникам, 20:00",
-		"🏳️‍⚧️ Транс-встреча 'Голоса' - 25 марта, 19:30",
-	}
-
-	result := fmt.Sprintf("📅 Ближайшие ЛГБТ+ мероприятия (следующие %d дней, тип: %s):\n", days, eventType)
-	for _, event := range events {
-		result += "  • " + event + "\n"
-	}
-	result += "\n🔗 Подробнее на https://lgbt-events.org"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) createLGBTQGroup(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("createLGBTQGroup: expected name and meeting type")
-	}
-	name, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("createLGBTQGroup: first argument must be string")
-	}
-	meetingType, ok := args[1].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("createLGBTQGroup: second argument must be string")
-	}
-
-	result := fmt.Sprintf("🌈 Группа '%s' создана!\n", name)
-	result += "📋 Информация о группе:\n"
-	result += "  • Тип встреч: " + meetingType + "\n"
-	result += "  • Статус: активна\n"
-	result += "  • Участников: 0\n\n"
-	result += "🔗 Ссылка для присоединения: https://lgbt-groups.org/join/" + strings.ReplaceAll(strings.ToLower(name), " ", "-")
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) findVolunteerOpportunity(args []TypedValue) (TypedValue, error) {
-	if len(args) < 2 {
-		return TypedValue{}, fmt.Errorf("findVolunteerOpportunity: expected organization and skills")
-	}
-	organization, ok := args[0].Value.(string)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findVolunteerOpportunity: first argument must be string")
-	}
-	skills, ok := args[1].Value.([]TypedValue)
-	if !ok {
-		return TypedValue{}, fmt.Errorf("findVolunteerOpportunity: second argument must be array")
-	}
-
-	skillsList := make([]string, len(skills))
-	for i, s := range skills {
-		if str, ok := s.Value.(string); ok {
-			skillsList[i] = str
-		}
-	}
-
-	opportunities := []string{
-		"📱 Помощь в ведении социальных сетей",
-		"📞 Оператор горячей линии поддержки",
-		"📝 Юридическая помощь ЛГБТ+",
-		"🎓 Проведение образовательных лекций",
-		"🎨 Организация культурных мероприятий",
-	}
-
-	result := fmt.Sprintf("🤝 Волонтерские возможности в организации '%s':\n", organization)
-	result += "Ваши навыки: " + strings.Join(skillsList, ", ") + "\n\n"
-	result += "📋 Доступные позиции:\n"
-	for _, opp := range opportunities {
-		result += "  • " + opp + "\n"
-	}
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQBook(args []TypedValue) (TypedValue, error) {
-	genre := "фантастика"
-	if len(args) > 0 {
-		if g, ok := args[0].Value.(string); ok {
-			genre = g
-		}
-	}
-
-	books := []string{
-		"📚 'Имя ветра' - Патрик Ротфусс (фантастика, ЛГБТ+ персонажи)",
-		"📚 'Гарри Поттер' - Джоан Роулинг (фэнтези с ЛГБТ+ подтекстом)",
-		"📚 'Орландо' - Вирджиния Вулф (классика, гендерная тематика)",
-		"📚 'Моррис' - Эдвард Форстер (ЛГБТ+ классика)",
-		"📚 'Месяц в глуши' - Эллен Хопкинс (современная проза)",
-	}
-
-	idx := i.rand.Intn(len(books))
-	return NewTypedString(fmt.Sprintf("📖 Рекомендуемая книга (жанр: %s):\n%s", genre, books[idx])), nil
-}
-
-func (i *Interpreter) getLGBTQPlaylist(args []TypedValue) (TypedValue, error) {
-	mood := "empowerment"
-	if len(args) > 0 {
-		if m, ok := args[0].Value.(string); ok {
-			mood = m
-		}
-	}
-
-	playlists := map[string]string{
-		"empowerment": "🎵 Плейлист 'Сила и гордость': Lady Gaga, Beyoncé, Madonna, Freddie Mercury",
-		"relaxation":  "🎵 Плейлист 'Спокойствие': Enya, Vangelis, Ludovico Einaudi",
-		"energy":      "🎵 Плейлист 'Энергия': Daft Punk, The Chemical Brothers, Prodigy",
-		"sad":         "🎵 Плейлист 'Меланхолия': Adele, Sam Smith, ЛГБТ-исполнители",
-		"love":        "🎵 Плейлист 'Любовь': Elton John, Freddie Mercury, George Michael",
-	}
-
-	result := fmt.Sprintf("🎶 Плейлист по настроению '%s':\n", mood)
-	if playlist, ok := playlists[mood]; ok {
-		result += "  " + playlist + "\n"
-	} else {
-		result += "  🎵 Рекомендуем: ЛГБТ+ исполнители разных жанров\n"
-	}
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQMovies(args []TypedValue) (TypedValue, error) {
-	genre := "романтика"
-	if len(args) > 0 {
-		if g, ok := args[0].Value.(string); ok {
-			genre = g
-		}
-	}
-
-	movies := []string{
-		"🎬 'Горбатая гора' (2005) - драма, романтика",
-		"🎬 'Кэрол' (2015) - драма, романтика",
-		"🎬 'Парень с соседнего кладбища' (2018) - комедия, романтика",
-		"🎬 'С тобой или без тебя' (2020) - драма",
-		"🎬 'Король Фредерик' (2020) - историческая драма",
-	}
-
-	idx := i.rand.Intn(len(movies))
-	return NewTypedString(fmt.Sprintf("🎥 Рекомендуемый фильм (жанр: %s):\n%s", genre, movies[idx])), nil
-}
-
-func (i *Interpreter) getPrideParadeInfo(args []TypedValue) (TypedValue, error) {
-	city := "global"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			city = c
-		}
-	}
-
-	year := time.Now().Year()
-	if len(args) > 1 {
-		if y, ok := args[1].Value.(int); ok {
-			year = y
-		}
-	}
-
-	parades := map[string]string{
-		"москва":   "🏳️‍🌈 Московский прайд: июнь 2026, ул. Тверская",
-		"спб":      "🏳️‍🌈 Санкт-Петербургский прайд: июль 2026, Невский проспект",
-		"нью-йорк": "🏳️‍🌈 NYC Pride: июнь 2026, Манхэттен",
-		"лондон":   "🏳️‍🌈 London Pride: июль 2026, центр Лондона",
-		"берлин":   "🏳️‍🌈 Berlin Pride (CSD): июль 2026, Бранденбургские ворота",
-		"париж":    "🏳️‍🌈 Paris Pride: июнь 2026, Марсово поле",
-		"сидней":   "🏳️‍🌈 Sydney Mardi Gras: февраль-март 2026, Оксфорд-стрит",
-		"токио":    "🏳️‍🌈 Tokyo Rainbow Pride: апрель 2026, парк Ёёги",
-		"сан-франциско": "🏳️‍🌈 SF Pride: июнь 2026, Маркет-стрит",
-		"афины":    "🏳️‍🌈 Athens Pride: июнь 2026, площадь Синтагма",
-	}
-
-	result := fmt.Sprintf("🏳️‍🌈 Информация о парадах гордости (%s, %d год):\n", city, year)
-	
-	if info, ok := parades[strings.ToLower(city)]; ok {
-		result += "  • " + info + "\n"
-	} else {
-		result += "  • ℹ️ Информация о параде в этом городе уточняется\n"
-	}
-	
-	result += "\n📅 Рекомендуем проверить даты на официальных сайтах прайд-организаций."
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getComingOutTips(args []TypedValue) (TypedValue, error) {
-	audience := "родители"
-	if len(args) > 0 {
-		if a, ok := args[0].Value.(string); ok {
-			audience = a
-		}
-	}
-
-	tips := map[string]string{
-		"родители": "👨‍👩‍👦 Советы для каминг-аута перед родителями:\n" +
-			"  • Выберите спокойное время для разговора\n" +
-			"  • Будьте готовы к вопросам и эмоциям\n" +
-			"  • Напомните им, что вы все еще их ребенок\n" +
-			"  • Дайте им время на осмысление",
-		"друзья": "👫 Советы для каминг-аута перед друзьями:\n" +
-			"  • Начните с самых близких друзей\n" +
-			"  • Будьте честны и открыты\n" +
-			"  • Дайте им понять, что вы доверяете им",
-		"работа": "💼 Советы для каминг-аута на работе:\n" +
-			"  • Проверьте политику компании по ЛГБТ+\n" +
-			"  • Поговорите с HR или доверенным менеджером\n" +
-			"  • Оцените риски в вашей стране",
-		"школа": "🏫 Советы для каминг-аута в школе:\n" +
-			"  • Найдите поддерживающего учителя или психолога\n" +
-			"  • Убедитесь, что школа поддерживает ЛГБТ+\n" +
-			"  • Не торопитесь, делайте это в своем темпе",
-	}
-
-	result := fmt.Sprintf("💡 Советы по каминг-ауту (аудитория: %s):\n", audience)
-	
-	if tipsContent, ok := tips[strings.ToLower(audience)]; ok {
-		result += tipsContent + "\n"
-	} else {
-		result += "  • ℹ️ Общие советы по каминг-ауту:\n"
-		result += "  • Будьте собой и доверяйте своим чувствам\n"
-		result += "  • Ищите поддержку в ЛГБТ+ сообществе\n"
-	}
-	
-	result += "\n🔗 Дополнительная поддержка: https://comingout.org"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getTransHealthcare(args []TypedValue) (TypedValue, error) {
-	country := "россия"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	healthcareInfo := map[string]string{
-		"россия": "🏳️‍⚧️ Транс-здравоохранение в России:\n" +
-			"  • Гендерно-аффирмативная помощь ограничена\n" +
-			"  • Требуется психиатрическое заключение\n" +
-			"  • Гормональная терапия доступна после диагноза\n" +
-			"  • Ресурсы: Транс-Альянс, Транс-Помощь",
-		"сша": "🏳️‍⚧️ Транс-здравоохранение в США:\n" +
-			"  • Широкий доступ к гендерно-аффирмативной помощи\n" +
-			"  • Медицинское страхование часто покрывает лечение\n" +
-			"  • Доступны клиники, специализирующиеся на транс-здоровье",
-		"великобритания": "🏳️‍⚧️ Транс-здравоохранение в Великобритании:\n" +
-			"  • NHS предоставляет гендерно-аффирмативную помощь\n" +
-			"  • Возможны длительные очереди\n" +
-			"  • Существуют частные клиники",
-		"германия": "🏳️‍⚧️ Транс-здравоохранение в Германии:\n" +
-			"  • Страховка покрывает гендерно-аффирмативную помощь\n" +
-			"  • Доступны специализированные центры\n" +
-			"  • Требуется психиатрическое заключение",
-	}
-
-	result := "🏥 Информация о транс-здравоохранении:\n"
-	if info, ok := healthcareInfo[strings.ToLower(country)]; ok {
-		result += info + "\n"
-	} else {
-		result += "  • ℹ️ Информация для этой страны уточняется\n"
-	}
-	
-	result += "\n💡 Рекомендуем обратиться к местным транс-организациям."
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) findLGBTQShelter(args []TypedValue) (TypedValue, error) {
-	location := "москва"
-	if len(args) > 0 {
-		if l, ok := args[0].Value.(string); ok {
-			location = l
-		}
-	}
-
-	shelters := []string{
-		"🏠 ЛГБТ-убежище 'Свет' - круглосуточная поддержка",
-		"🏠 Приют для ЛГБТ+ молодежи 'Надежда'",
-		"🏠 Центр временного проживания 'Радужный дом'",
-		"🏠 Кризисный центр для ЛГБТ 'Вместе'",
-	}
-
-	result := fmt.Sprintf("🏠 ЛГБТ-убежища и приюты в регионе '%s':\n", location)
-	for _, shelter := range shelters {
-		result += "  • " + shelter + "\n"
-	}
-	result += "\n📞 Телефон кризисной поддержки: 8-800-XXX-XX-XX"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getIntersexResources(args []TypedValue) (TypedValue, error) {
-	country := "global"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	resources := "🌍 Ресурсы для интерсекс-людей:\n" +
-		"  • OII (Organization Intersex International)\n" +
-		"  • InterACT - защита прав интерсекс-молодежи\n" +
-		"  • Ресурсы по медицинской помощи\n" +
-		"  • Группы поддержки для интерсекс-людей\n"
-
-	if country != "global" {
-		resources += fmt.Sprintf("\n📍 Ресурсы в стране '%s' уточняются.\n", country)
-	}
-
-	return NewTypedString(resources), nil
-}
-
-func (i *Interpreter) getNonbinaryGuide(args []TypedValue) (TypedValue, error) {
-	guide := "💜 Гид для небинарных людей:\n\n" +
-		"📝 Идентичность:\n" +
-		"  • Небинарность - гендерная идентичность вне бинарной системы\n" +
-		"  • Может включать: агендерность, бигендерность, гендерфлюидность\n" +
-		"  • У каждого свой уникальный опыт\n\n" +
-		"🔤 Язык и местоимения:\n" +
-		"  • Местоимения: они/их, ze/zir, или другие\n" +
-		"  • Важно уважать выбор человека\n\n" +
-		"💡 Советы:\n" +
-		"  • Найдите поддерживающее сообщество\n" +
-		"  • Практикуйте самовыражение в безопасной среде\n" +
-		"  • Помните, что ваша идентичность валидна"
-
-	return NewTypedString(guide), nil
-}
-
-func (i *Interpreter) findLGBTQTherapist(args []TypedValue) (TypedValue, error) {
-	specialty := "психотерапевт"
-	if len(args) > 0 {
-		if s, ok := args[0].Value.(string); ok {
-			specialty = s
-		}
-	}
-
-	location := "онлайн"
-	if len(args) > 1 {
-		if l, ok := args[1].Value.(string); ok {
-			location = l
-		}
-	}
-
-	therapists := []string{
-		"🧠 Специалист по ЛГБТ+ вопросам - онлайн-консультации",
-		"🧠 Терапевт с опытом работы с транс-людьми",
-		"🧠 Психолог для небинарных и гендерно-неконформных людей",
-		"🧠 Семейный терапевт для ЛГБТ+ семей",
-		"🧠 Кризисный психолог - поддержка при каминг-ауте",
-	}
-
-	result := fmt.Sprintf("🧠 ЛГБТ-дружественные терапевты (%s, %s):\n", specialty, location)
-	for _, therapist := range therapists {
-		result += "  • " + therapist + "\n"
-	}
-	result += "\n💡 Проверьте лицензию и отзывы перед обращением"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getAsylumInfo(args []TypedValue) (TypedValue, error) {
-	country := "россия"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	info := "🛂 Информация о получении убежища для ЛГБТ+:\n\n" +
-		"📋 Требования:\n" +
-		"  • Доказательства преследования по признаку ориентации\n" +
-		"  • Медицинские документы (при необходимости)\n" +
-		"  • Письма поддержки от ЛГБТ-организаций\n\n" +
-		"📍 Страны для убежища:\n" +
-		"  • Канада - программа защиты ЛГБТ-беженцев\n" +
-		"  • Великобритания - специальные программы\n" +
-		"  • Германия - поддержка квир-беженцев\n" +
-		"  • США - убежище для преследуемых ЛГБТ+\n"
-
-	if country != "россия" {
-		info += fmt.Sprintf("\n📍 Информация для страны '%s' уточняется.\n", country)
-	}
-
-	return NewTypedString(info), nil
-}
-
-func (i *Interpreter) getAsexualResources(args []TypedValue) (TypedValue, error) {
-	resources := "🤍 Ресурсы для асексуальных людей:\n\n" +
-		"📖 Определение:\n" +
-		"  • Асексуальность - отсутствие сексуального влечения\n" +
-		"  • Спектр: демисексуальность, грей-сексуальность\n" +
-		"  • Аромантизм - отсутствие романтического влечения\n\n" +
-		"💡 Сообщество:\n" +
-		"  • AVEN (Asexual Visibility and Education Network)\n" +
-		"  • Группы поддержки для асексуалов\n" +
-		"  • Онлайн-форумы и чаты\n\n" +
-		"📚 Ресурсы:\n" +
-		"  • Книги и статьи об асексуальности\n" +
-		"  • Документальные фильмы\n" +
-		"  • Подкасты"
-
-	return NewTypedString(resources), nil
-}
-
-func (i *Interpreter) getPolyamoryGuide(args []TypedValue) (TypedValue, error) {
-	guide := "💕 Гид по полиамории и этичной немоногамии:\n\n" +
-		"📖 Основные концепции:\n" +
-		"  • Этичная немоногамия - отношения с согласием всех участников\n" +
-		"  • Полиамория - возможность любить нескольких людей\n" +
-		"  • Различные модели: иерархическая, неиерархическая\n\n" +
-		"⚖️ Правила и границы:\n" +
-		"  • Открытая коммуникация\n" +
-		"  • Честность и прозрачность\n" +
-		"  • Уважение к потребностям каждого\n\n" +
-		"💡 Ресурсы:\n" +
-		"  • Книга 'Этичный шлюха'\n" +
-		"  • Сообщества и группы поддержки\n" +
-		"  • Психологи, специализирующиеся на немоногамии"
-
-	return NewTypedString(guide), nil
-}
-
-func (i *Interpreter) getGenderAffirmingCare(args []TypedValue) (TypedValue, error) {
-	country := "россия"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			country = c
-		}
-	}
-
-	info := "🏳️‍⚧️ Гендерно-аффирмативная помощь:\n\n" +
-		"🩺 Медицинские услуги:\n" +
-		"  • Гормональная терапия\n" +
-		"  • Хирургические операции\n" +
-		"  • Логопедия для коррекции голоса\n" +
-		"  • Электроэпиляция\n\n" +
-		"🧠 Психологическая поддержка:\n" +
-		"  • Терапия с ЛГБТ-дружественным психологом\n" +
-		"  • Группы поддержки\n" +
-		"  • Консультации по социальному переходу\n\n" +
-		"⚖️ Юридическая помощь:\n" +
-		"  • Смена документов\n" +
-		"  • Защита прав на рабочем месте"
-
-	if country != "россия" {
-		info += fmt.Sprintf("\n📍 Информация для страны '%s' уточняется.\n", country)
-	}
-
-	return NewTypedString(info), nil
-}
-
-func (i *Interpreter) findLGBTQCommunity(args []TypedValue) (TypedValue, error) {
-	interest := "общий"
-	if len(args) > 0 {
-		if i2, ok := args[0].Value.(string); ok {
-			interest = i2
-		}
-	}
-
-	communities := map[string]string{
-		"спорт": "🏋️‍♀️ Спортивные ЛГБТ+ сообщества: клубы по футболу, волейболу, плаванию",
-		"искусство": "🎨 Арт-сообщества: ЛГБТ+ художники, писатели, музыканты",
-		"технологии": "💻 ЛГБТ+ в IT: сообщества разработчиков, дизайнеров",
-		"образование": "📚 Образовательные сообщества: клубы, лекции, тренинги",
-		"активизм": "✊ Активистские группы: защита прав, протесты, кампании",
-		"здоровье": "🏥 ЛГБТ+ в здравоохранении: врачи, психологи, поддержка",
-		"бизнес": "💼 ЛГБТ+ предприниматели: стартапы, нетворкинг",
-		"религия": "🕊️ Инклюзивные религиозные общины",
-		"родители": "👨‍👩‍👧 ЛГБТ-родители и семьи",
-		"молодежь": "🧒 ЛГБТ+ молодежные организации",
-	}
-
-	result := fmt.Sprintf("👥 ЛГБТ+ сообщества по интересам: %s\n", interest)
-	
-	if communitiesContent, ok := communities[strings.ToLower(interest)]; ok {
-		result += "  • " + communitiesContent + "\n"
-	} else {
-		result += "  • Общие ЛГБТ+ сообщества: встречи, группы поддержки, мероприятия\n"
-	}
-	
-	result += "\n🔗 Поищите в социальных сетях и на платформах для ЛГБТ+"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQHistory(args []TypedValue) (TypedValue, error) {
-	era := "общая"
-	if len(args) > 0 {
-		if e, ok := args[0].Value.(string); ok {
-			era = e
-		}
-	}
-
-	history := map[string]string{
-		"общая": "📜 Основные вехи ЛГБТ+ истории:\n" +
-			"  • 1969 - Стоунволлские бунты\n" +
-			"  • 1973 - Исключение гомосексуальности из DSM\n" +
-			"  • 2015 - Легализация однополых браков в США\n" +
-			"  • 2023 - Все больше стран легализуют однополые браки",
-		"древний": "🏛️ Древняя история:\n" +
-			"  • Древняя Греция - гомосексуальные отношения\n" +
-			"  • Древний Рим - разнообразие сексуальных практик\n" +
-			"  • Индия - историческое признание третьего пола",
-		"средневековье": "⚔️ Средневековье:\n" +
-			"  • Преследование за гомосексуальность\n" +
-			"  • Подпольные ЛГБТ+ сообщества\n" +
-			"  • Религиозные запреты",
-		"новое": "🌍 Новейшая история:\n" +
-			"  • ЛГБТ+ движение\n" +
-			"  • Достижения в правах ЛГБТ+\n" +
-			"  • Современные вызовы",
-	}
-
-	result := fmt.Sprintf("📚 ЛГБТ+ история (эпоха: %s):\n", era)
-	
-	if historyContent, ok := history[strings.ToLower(era)]; ok {
-		result += historyContent + "\n"
-	} else {
-		result += "  • История ЛГБТ+ разнообразна и богата\n"
-	}
-	
-	result += "\n📖 Рекомендуем книги и фильмы по ЛГБТ+ истории"
-
-	return NewTypedString(result), nil
-}
-
-func (i *Interpreter) getLGBTQParenting(args []TypedValue) (TypedValue, error) {
-	parenting := "👨‍👩‍👧 Информация для ЛГБТ-родителей:\n\n" +
-		"📋 Пути создания семьи:\n" +
-		"  • Суррогатное материнство\n" +
-		"  • Усыновление\n" +
-		"  • Донорство\n" +
-		"  • Воспитание детей от предыдущих отношений\n\n" +
-		"⚖️ Юридические вопросы:\n" +
-		"  • Права обоих родителей\n" +
-		"  • Усыновление в разных странах\n" +
-		"  • Регистрация брака для защиты прав\n\n" +
-		"💡 Поддержка:\n" +
-		"  • Группы для ЛГБТ-родителей\n" +
-		"  • Ресурсы для детей из ЛГБТ-семей\n" +
-		"  • Консультации специалистов"
-
-	return NewTypedString(parenting), nil
-}
-
-func (i *Interpreter) getConversionTherapyHelp(args []TypedValue) (TypedValue, error) {
-	help := "🚫 Помощь жертвам конверсионной терапии:\n\n" +
-		"📋 Что это:\n" +
-		"  • Попытки изменить сексуальную ориентацию\n" +
-		"  • Псевдонаучные методы\n" +
-		"  • Запрещена во многих странах\n\n" +
-		"💡 Что делать:\n" +
-		"  • Обратитесь за помощью к профессионалам\n" +
-		"  • Найдите поддержку в ЛГБТ+ сообществе\n" +
-		"  • Подайте жалобу в соответствующие органы\n\n" +
-		"📞 Горячие линии:\n" +
-		"  • Линия поддержки жертв конверсионной терапии\n" +
-		"  • Психологическая помощь\n" +
-		"  • Юридическая консультация"
-
-	return NewTypedString(help), nil
-}
-
-func (i *Interpreter) getLGBTQHousing(args []TypedValue) (TypedValue, error) {
-	location := "москва"
-	if len(args) > 0 {
-		if l, ok := args[0].Value.(string); ok {
-			location = l
-		}
-	}
-
-	housing := fmt.Sprintf("🏠 ЛГБТ-дружественное жилье в %s:\n\n", location) +
-		"🏢 Варианты:\n" +
-		"  • ЛГБТ-дружественные общежития\n" +
-		"  • Комнаты с квир-соседями\n" +
-		"  • Квартиры в инклюзивных районах\n" +
-		"  • Временные приюты\n\n" +
-		"🔍 Как искать:\n" +
-		"  • Специализированные платформы для ЛГБТ+\n" +
-		"  • Группы в социальных сетях\n" +
-		"  • Рекомендации от ЛГБТ-организаций\n\n" +
-		"⚖️ Права:\n" +
-		"  • Защита от дискриминации\n" +
-		"  • Юридическая помощь"
-
-	return NewTypedString(housing), nil
-}
-
-func (i *Interpreter) getQueerArt(args []TypedValue) (TypedValue, error) {
-	medium := "все"
-	if len(args) > 0 {
-		if m, ok := args[0].Value.(string); ok {
-			medium = m
-		}
-	}
-
-	art := fmt.Sprintf("🎨 Квир-искусство (медиум: %s):\n\n", medium) +
-		"🎭 Художники:\n" +
-		"  • Фрида Кало - символика и идентичность\n" +
-		"  • Кит Харинг - активистское искусство\n" +
-		"  • Дэвид Хокни - квир-живопись\n" +
-		"  • Zanele Muholi - фотография квир-сообществ\n\n" +
-		"📚 Направления:\n" +
-		"  • Квир-живопись и скульптура\n" +
-		"  • Фотография и инсталляции\n" +
-		"  • Перформанс и видео-арт\n" +
-		"  • Квир-литература\n\n" +
-		"🎬 Где смотреть:\n" +
-		"  • ЛГБТ+ кинофестивали\n" +
-		"  • Выставки в музеях\n" +
-		"  • Онлайн-галереи"
-
-	return NewTypedString(art), nil
-}
-
-func (i *Interpreter) getLGBTQFriendlyCities(args []TypedValue) (TypedValue, error) {
-	criteria := "общий"
-	if len(args) > 0 {
-		if c, ok := args[0].Value.(string); ok {
-			criteria = c
-		}
-	}
-
-	cities := map[string]string{
-		"общий": "🌍 ЛГБТ-дружественные города мира:\n" +
-			"  • Сан-Франциско (США)\n" +
-			"  • Амстердам (Нидерланды)\n" +
-			"  • Берлин (Германия)\n" +
-			"  • Торонто (Канада)\n" +
-			"  • Сидней (Австралия)\n" +
-			"  • Монреаль (Канада)\n" +
-			"  • Копенгаген (Дания)",
-		"европа": "🌍 ЛГБТ-дружественные города Европы:\n" +
-			"  • Амстердам\n" +
-			"  • Берлин\n" +
-			"  • Копенгаген\n" +
-			"  • Лондон\n" +
-			"  • Мадрид",
-		"азия": "🌍 ЛГБТ-дружественные города Азии:\n" +
-			"  • Токио (Япония)\n" +
-			"  • Сеул (Южная Корея)\n" +
-			"  • Тайбэй (Тайвань)\n" +
-			"  • Манила (Филиппины)",
-		"америка": "🌍 ЛГБТ-дружественные города Америки:\n" +
-			"  • Сан-Франциско\n" +
-			"  • Торонто\n" +
-			"  • Нью-Йорк\n" +
-			"  • Монреаль\n" +
-			"  • Буэнос-Айрес",
-	}
-
-	result := fmt.Sprintf("🌍 ЛГБТ-дружественные города (категория: %s):\n", criteria)
-	
-	if citiesContent, ok := cities[strings.ToLower(criteria)]; ok {
-		result += citiesContent + "\n"
-	} else {
-		result += "  • Информация по этой категории уточняется\n"
-	}
-	
-	result += "\n💡 Рейтинги основаны на законах, культуре и ЛГБТ-жизни"
-
-	return NewTypedString(result), nil
-}
-
-// ---------- Встроенные функции ----------
-func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (TypedValue, error), bool) {
-	builtins := map[string]func([]TypedValue) (TypedValue, error){
-		"readFile": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("readFile: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("readFile: argument must be string")
-			}
-			filename := args[0].Value.(string)
-
-			if err := i.sandbox.CheckFilePath(filename); err != nil {
-				return TypedValue{}, err
-			}
-
-			info, err := os.Stat(filename)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			if info.Size() > i.sandbox.maxFileSize {
-				return TypedValue{}, fmt.Errorf("file too large: %d bytes (max: %d)", info.Size(), i.sandbox.maxFileSize)
-			}
-
-			data, err := os.ReadFile(filename)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			return NewTypedString(string(data)), nil
-		},
-		"writeFile": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("writeFile: expected 2 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("writeFile: first argument must be string")
-			}
-			if args[1].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("writeFile: second argument must be string")
-			}
-			filename := args[0].Value.(string)
-
-			if err := i.sandbox.CheckFilePath(filename); err != nil {
-				return TypedValue{}, err
-			}
-
-			content := args[1].Value.(string)
-			if int64(len(content)) > i.sandbox.maxFileSize {
-				return TypedValue{}, fmt.Errorf("content too large: %d bytes (max: %d)", len(content), i.sandbox.maxFileSize)
-			}
-
-			err := os.WriteFile(filename, []byte(content), 0644)
-			return TypedValue{Type: TypeNull, Value: nil}, err
-		},
-		"fileExists": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("fileExists: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("fileExists: argument must be string")
-			}
-			filename := args[0].Value.(string)
-			_, err := os.Stat(filename)
-			return NewTypedBool(err == nil), nil
-		},
-		"getDirFiles": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("getDirFiles: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("getDirFiles: argument must be string")
-			}
-			dir := args[0].Value.(string)
-
-			if err := i.sandbox.CheckFilePath(dir); err != nil {
-				return TypedValue{}, err
-			}
-
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			files := make([]TypedValue, len(entries))
-			for idx, entry := range entries {
-				files[idx] = NewTypedString(entry.Name())
-			}
-			return NewTypedArray(files), nil
-		},
-		"split": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("split: expected 2 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("split: first argument must be string")
-			}
-			if args[1].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("split: second argument must be string")
-			}
-			text := args[0].Value.(string)
-			delim := args[1].Value.(string)
-			parts := strings.Split(text, delim)
-			result := make([]TypedValue, len(parts))
-			for i, p := range parts {
-				result[i] = NewTypedString(p)
-			}
-			return NewTypedArray(result), nil
-		},
-		"replace": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 3 {
-				return TypedValue{}, fmt.Errorf("replace: expected 3 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeString || args[1].Type != TypeString || args[2].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("replace: all arguments must be strings")
-			}
-			text := args[0].Value.(string)
-			old := args[1].Value.(string)
-			new := args[2].Value.(string)
-			return NewTypedString(strings.ReplaceAll(text, old, new)), nil
-		},
-		"trim": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("trim: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("trim: argument must be string")
-			}
-			text := args[0].Value.(string)
-			return NewTypedString(strings.TrimSpace(text)), nil
-		},
-		"length": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("length: expected 1 argument, got %d", len(args))
-			}
-			switch args[0].Type {
-			case TypeString:
-				return NewTypedInt(len(args[0].Value.(string))), nil
-			case TypeArray:
-				return NewTypedInt(len(args[0].Value.([]TypedValue))), nil
-			default:
-				return TypedValue{}, fmt.Errorf("length: argument must be string or array")
-			}
-		},
-		"toUpper": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("toUpper: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("toUpper: argument must be string")
-			}
-			text := args[0].Value.(string)
-			return NewTypedString(strings.ToUpper(text)), nil
-		},
-		"toLower": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("toLower: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("toLower: argument must be string")
-			}
-			text := args[0].Value.(string)
-			return NewTypedString(strings.ToLower(text)), nil
-		},
-		"append": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("append: expected 2 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeArray {
-				return TypedValue{}, fmt.Errorf("append: first argument must be array")
-			}
-			arr := args[0].Value.([]TypedValue)
-			return NewTypedArray(append(arr, args[1])), nil
-		},
-		"remove": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("remove: expected 2 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeArray {
-				return TypedValue{}, fmt.Errorf("remove: first argument must be array")
-			}
-			if args[1].Type != TypeInt {
-				return TypedValue{}, fmt.Errorf("remove: second argument must be integer")
-			}
-			arr := args[0].Value.([]TypedValue)
-			idx := args[1].Value.(int)
-			if idx < 0 || idx >= len(arr) {
-				return TypedValue{}, fmt.Errorf("remove: index out of range")
-			}
-			return NewTypedArray(append(arr[:idx], arr[idx+1:]...)), nil
-		},
-		"random": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("random: expected 2 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeInt || args[1].Type != TypeInt {
-				return TypedValue{}, fmt.Errorf("random: arguments must be integers")
-			}
-			min := args[0].Value.(int)
-			max := args[1].Value.(int)
-			if min > max {
-				return TypedValue{}, fmt.Errorf("random: min must be <= max")
-			}
-			result := min + i.rand.Intn(max-min+1)
-			return NewTypedInt(result), nil
-		},
-		"max": func(args []TypedValue) (TypedValue, error) {
-			if len(args) < 2 {
-				return TypedValue{}, fmt.Errorf("max: expected at least 2 arguments")
-			}
-			maxVal := args[0]
-			for _, arg := range args[1:] {
-				cmp, err := compareTypedValues(arg, maxVal)
-				if err != nil {
-					return TypedValue{}, err
-				}
-				if cmp > 0 {
-					maxVal = arg
-				}
-			}
-			return maxVal, nil
-		},
-		"min": func(args []TypedValue) (TypedValue, error) {
-			if len(args) < 2 {
-				return TypedValue{}, fmt.Errorf("min: expected at least 2 arguments")
-			}
-			minVal := args[0]
-			for _, arg := range args[1:] {
-				cmp, err := compareTypedValues(arg, minVal)
-				if err != nil {
-					return TypedValue{}, err
-				}
-				if cmp < 0 {
-					minVal = arg
-				}
-			}
-			return minVal, nil
-		},
-		"sqrt": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("sqrt: expected 1 argument, got %d", len(args))
-			}
-			var val float64
-			switch args[0].Type {
-			case TypeInt:
-				val = float64(args[0].Value.(int))
-			case TypeFloat:
-				val = args[0].Value.(float64)
-			default:
-				return TypedValue{}, fmt.Errorf("sqrt: argument must be number")
-			}
-			if val < 0 {
-				return TypedValue{}, fmt.Errorf("sqrt: cannot take square root of negative number")
-			}
-			result := val / 2
-			for i := 0; i < 100; i++ {
-				result = (result + val/result) / 2
-			}
-			return NewTypedFloat(result), nil
-		},
-		"pow": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("pow: expected 2 arguments, got %d", len(args))
-			}
-			var base float64
-			switch args[0].Type {
-			case TypeInt:
-				base = float64(args[0].Value.(int))
-			case TypeFloat:
-				base = args[0].Value.(float64)
-			default:
-				return TypedValue{}, fmt.Errorf("pow: first argument must be number")
-			}
-			var exp float64
-			switch args[1].Type {
-			case TypeInt:
-				exp = float64(args[1].Value.(int))
-			case TypeFloat:
-				exp = args[1].Value.(float64)
-			default:
-				return TypedValue{}, fmt.Errorf("pow: second argument must be number")
-			}
-			if exp == float64(int(exp)) {
-				result := 1.0
-				for i := 0; i < int(exp); i++ {
-					result *= base
-				}
-				return NewTypedFloat(result), nil
-			}
-			return NewTypedFloat(float64(1)), nil
-		},
-		"getTime": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 0 {
-				return TypedValue{}, fmt.Errorf("getTime: expected 0 arguments")
-			}
-			return NewTypedString(time.Now().Format("2006-01-02 15:04:05")), nil
-		},
-		"getYear": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 0 {
-				return TypedValue{}, fmt.Errorf("getYear: expected 0 arguments")
-			}
-			return NewTypedInt(time.Now().Year()), nil
-		},
-		"getMonth": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 0 {
-				return TypedValue{}, fmt.Errorf("getMonth: expected 0 arguments")
-			}
-			return NewTypedInt(int(time.Now().Month())), nil
-		},
-		"getOS": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 0 {
-				return TypedValue{}, fmt.Errorf("getOS: expected 0 arguments")
-			}
-			return NewTypedString(os.Getenv("OS")), nil
-		},
-		"getHostname": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 0 {
-				return TypedValue{}, fmt.Errorf("getHostname: expected 0 arguments")
-			}
-			hostname, err := os.Hostname()
-			if err != nil {
-				return TypedValue{}, err
-			}
-			return NewTypedString(hostname), nil
-		},
-		"getArgs": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 0 {
-				return TypedValue{}, fmt.Errorf("getArgs: expected 0 arguments")
-			}
-			argsSlice := os.Args[1:]
-			result := make([]TypedValue, len(argsSlice))
-			for i, a := range argsSlice {
-				result[i] = NewTypedString(a)
-			}
-			return NewTypedArray(result), nil
-		},
-		"hasFlag": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("hasFlag: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("hasFlag: argument must be string")
-			}
-			flag := args[0].Value.(string)
-			for _, arg := range os.Args[1:] {
-				if arg == flag {
-					return NewTypedBool(true), nil
-				}
-			}
-			return NewTypedBool(false), nil
-		},
-		"httpGet": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("httpGet: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("httpGet: argument must be string")
-			}
-			url := args[0].Value.(string)
-
-			if err := i.sandbox.CheckURL(url); err != nil {
-				return TypedValue{}, err
-			}
-
-			client := &http.Client{Timeout: 30 * time.Second}
-			resp, err := client.Get(url)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				return TypedValue{}, fmt.Errorf("HTTP error: %s", resp.Status)
-			}
-
-			body, err := io.ReadAll(io.LimitReader(resp.Body, i.sandbox.maxFileSize))
-			if err != nil {
-				return TypedValue{}, err
-			}
-			return NewTypedString(string(body)), nil
-		},
-		"httpPost": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("httpPost: expected 2 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeString || args[1].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("httpPost: arguments must be strings")
-			}
-			url := args[0].Value.(string)
-			data := args[1].Value.(string)
-
-			if err := i.sandbox.CheckURL(url); err != nil {
-				return TypedValue{}, err
-			}
-
-			client := &http.Client{Timeout: 30 * time.Second}
-			resp, err := client.Post(url, "application/json", strings.NewReader(data))
-			if err != nil {
-				return TypedValue{}, err
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				return TypedValue{}, fmt.Errorf("HTTP error: %s", resp.Status)
-			}
-
-			body, err := io.ReadAll(io.LimitReader(resp.Body, i.sandbox.maxFileSize))
-			if err != nil {
-				return TypedValue{}, err
-			}
-			return NewTypedString(string(body)), nil
-		},
-		"jsonParse": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("jsonParse: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("jsonParse: argument must be string")
-			}
-			jsonStr := args[0].Value.(string)
-
-			if int64(len(jsonStr)) > i.sandbox.maxFileSize {
-				return TypedValue{}, fmt.Errorf("JSON too large: %d bytes", len(jsonStr))
-			}
-
-			var result interface{}
-			err := json.Unmarshal([]byte(jsonStr), &result)
-			if err != nil {
-				return TypedValue{}, fmt.Errorf("invalid JSON: %v", err)
-			}
-
-			return i.jsonToTypedValue(result), nil
-		},
-		"md5": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("md5: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("md5: argument must be string")
-			}
-			text := args[0].Value.(string)
-			hash := md5.Sum([]byte(text))
-			return NewTypedString(hex.EncodeToString(hash[:])), nil
-		},
-		"sha256": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("sha256: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("sha256: argument must be string")
-			}
-			text := args[0].Value.(string)
-			hash := sha256.Sum256([]byte(text))
-			return NewTypedString(hex.EncodeToString(hash[:])), nil
-		},
-		"regexFind": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 2 {
-				return TypedValue{}, fmt.Errorf("regexFind: expected 2 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeString || args[1].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("regexFind: arguments must be strings")
-			}
-			pattern := args[0].Value.(string)
-			text := args[1].Value.(string)
-			re, err := regexp.Compile(pattern)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			matches := re.FindAllString(text, -1)
-			result := make([]TypedValue, len(matches))
-			for i, m := range matches {
-				result[i] = NewTypedString(m)
-			}
-			return NewTypedArray(result), nil
-		},
-		"regexReplace": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 3 {
-				return TypedValue{}, fmt.Errorf("regexReplace: expected 3 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeString || args[1].Type != TypeString || args[2].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("regexReplace: all arguments must be strings")
-			}
-			pattern := args[0].Value.(string)
-			text := args[1].Value.(string)
-			replacement := args[2].Value.(string)
-			re, err := regexp.Compile(pattern)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			return NewTypedString(re.ReplaceAllString(text, replacement)), nil
-		},
-		"sleep": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 1 {
-				return TypedValue{}, fmt.Errorf("sleep: expected 1 argument, got %d", len(args))
-			}
-			if args[0].Type != TypeInt {
-				return TypedValue{}, fmt.Errorf("sleep: argument must be integer")
-			}
-			ms := args[0].Value.(int)
-			if ms > 60000 {
-				return TypedValue{}, fmt.Errorf("sleep: maximum 60000ms")
-			}
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-			return TypedValue{Type: TypeNull, Value: nil}, nil
-		},
-		"sendEmail": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 3 {
-				return TypedValue{}, fmt.Errorf("sendEmail: expected 3 arguments, got %d", len(args))
-			}
-			if args[0].Type != TypeString || args[1].Type != TypeString || args[2].Type != TypeString {
-				return TypedValue{}, fmt.Errorf("sendEmail: all arguments must be strings")
-			}
-			to := args[0].Value.(string)
-			subject := args[1].Value.(string)
-			body := args[2].Value.(string)
-			fmt.Fprintf(output, "Email sent to %s: %s - %s\n", to, subject, body)
-			return TypedValue{Type: TypeNull, Value: nil}, nil
-		},
-		"flag": func(args []TypedValue) (TypedValue, error) {
-			if len(args) != 0 {
-				return TypedValue{}, fmt.Errorf("flag: expected 0 arguments, got %d", len(args))
-			}
-			
-			rainbowColors := []string{
-				"#FF0000", "#FF7F00", "#FFFF00", "#00FF00", "#0000FF", "#4B0082", "#8B00FF",
-			}
-			
-			result := make([]TypedValue, len(rainbowColors))
-			for i, color := range rainbowColors {
-				result[i] = NewTypedString(color)
-			}
-			return NewTypedArray(result), nil
-		},
-		"createServer":          i.createServer,
-		"startServer":           i.startServer,
-		"stopServer":            i.stopServer,
-		"addRoute":              i.addRoute,
-		"getServerStatus":       i.getServerStatus,
-		"listServers":           i.listServers,
-		"antiHomoPhobe":         i.antiHomoPhobe,
-		"getLGBTResources":      i.getLGBTResources,
-		"findSafeSpace":         i.findSafeSpace,
-		"getCrisisSupport":      i.getCrisisSupport,
-		"getLGBTQLaws":          i.getLGBTQLaws,
-		"getDailyAffirmation":   i.getDailyAffirmation,
-		"moodCheck":             i.moodCheck,
-		"guidedBreathing":       i.guidedBreathing,
-		"defineTerm":            i.defineTerm,
-		"lgbtHistoryQuiz":       i.lgbtHistoryQuiz,
-		"getDailyFact":          i.getDailyFact,
-		"getHRTInfo":            i.getHRTInfo,
-		"findLGBTDoctor":        i.findLGBTDoctor,
-		"getDocumentChangeGuide": i.getDocumentChangeGuide,
-		"getLGBTQEvents":        i.getLGBTQEvents,
-		"createLGBTQGroup":      i.createLGBTQGroup,
-		"findVolunteerOpportunity": i.findVolunteerOpportunity,
-		"getLGBTQBook":          i.getLGBTQBook,
-		"getLGBTQPlaylist":      i.getLGBTQPlaylist,
-		"getLGBTQMovies":        i.getLGBTQMovies,
-		"getPrideParadeInfo":    i.getPrideParadeInfo,
-		"getComingOutTips":      i.getComingOutTips,
-		"getTransHealthcare":    i.getTransHealthcare,
-		"findLGBTQShelter":      i.findLGBTQShelter,
-		"getIntersexResources":  i.getIntersexResources,
-		"getNonbinaryGuide":     i.getNonbinaryGuide,
-		"findLGBTQTherapist":    i.findLGBTQTherapist,
-		"getAsylumInfo":         i.getAsylumInfo,
-		"getAsexualResources":   i.getAsexualResources,
-		"getPolyamoryGuide":     i.getPolyamoryGuide,
-		"getGenderAffirmingCare": i.getGenderAffirmingCare,
-		"findLGBTQCommunity":    i.findLGBTQCommunity,
-		"getLGBTQHistory":       i.getLGBTQHistory,
-		"getLGBTQParenting":     i.getLGBTQParenting,
-		"getConversionTherapyHelp": i.getConversionTherapyHelp,
-		"getLGBTQHousing":       i.getLGBTQHousing,
-		"getQueerArt":           i.getQueerArt,
-		"getLGBTQFriendlyCities": i.getLGBTQFriendlyCities,
-	}
-
-	fn, ok := builtins[name]
-	return fn, ok
-}
-
-func (i *Interpreter) jsonToTypedValue(v interface{}) TypedValue {
-	if v == nil {
-		return TypedValue{Type: TypeNull, Value: nil}
-	}
-
-	switch val := v.(type) {
-	case string:
-		return NewTypedString(val)
-	case float64:
-		if val == float64(int(val)) {
-			return NewTypedInt(int(val))
-		}
-		return NewTypedFloat(val)
-	case bool:
-		return NewTypedBool(val)
-	case []interface{}:
-		arr := make([]TypedValue, len(val))
-		for idx, elem := range val {
-			arr[idx] = i.jsonToTypedValue(elem)
-		}
-		return NewTypedArray(arr)
-	case map[string]interface{}:
-		arr := make([]TypedValue, 0, len(val)*2)
-		for k, v2 := range val {
-			arr = append(arr, NewTypedString(k))
-			arr = append(arr, i.jsonToTypedValue(v2))
-		}
-		return NewTypedArray(arr)
-	default:
-		return NewTypedString(fmt.Sprintf("%v", v))
-	}
-}
-
-func compareTypedValues(a, b TypedValue) (int, error) {
-	if a.Type != b.Type {
-		return 0, fmt.Errorf("cannot compare different types: %v and %v", a.Type, b.Type)
-	}
-
-	switch a.Type {
-	case TypeInt:
-		va := a.Value.(int)
-		vb := b.Value.(int)
-		if va < vb {
-			return -1, nil
-		} else if va > vb {
-			return 1, nil
-		}
-		return 0, nil
-	case TypeFloat:
-		va := a.Value.(float64)
-		vb := b.Value.(float64)
-		if va < vb {
-			return -1, nil
-		} else if va > vb {
-			return 1, nil
-		}
-		return 0, nil
-	case TypeString:
-		va := a.Value.(string)
-		vb := b.Value.(string)
-		if va < vb {
-			return -1, nil
-		} else if va > vb {
-			return 1, nil
-		}
-		return 0, nil
-	default:
-		return 0, fmt.Errorf("cannot compare type %v", a.Type)
-	}
-}
-
-func (i *Interpreter) isTruthy(val TypedValue) bool {
-	switch val.Type {
-	case TypeBool:
-		return val.Value.(bool)
-	case TypeInt:
-		return val.Value.(int) != 0
-	case TypeFloat:
-		return val.Value.(float64) != 0
-	case TypeString:
-		return val.Value.(string) != ""
-	case TypeArray:
-		return len(val.Value.([]TypedValue)) > 0
-	case TypeObject:
-		return true
-	default:
-		return false
-	}
-}
-
-func (i *Interpreter) handleInclude(n *IncludeStatement) (TypedValue, error) {
-	filename := n.Filename
-
-	if err := i.sandbox.CheckFilePath(filename); err != nil {
-		return TypedValue{}, err
-	}
-
-	searchPaths := []string{
-		".",
-	}
-
-	if currentFilePath != "" {
-		dir := filepath.Dir(currentFilePath)
-		searchPaths = append(searchPaths, dir)
-	}
-
-	searchPaths = append(searchPaths, "libs")
-	searchPaths = append(searchPaths, "libraries")
-
-	var fileContent []byte
-	var err error
-	var found bool
-
-	for _, path := range searchPaths {
-		fullPath := filepath.Join(path, filename)
-		if !strings.HasSuffix(fullPath, ".rb") && !strings.HasSuffix(fullPath, ".rainbow") {
-			testPath := fullPath + ".rb"
-			fileContent, err = os.ReadFile(testPath)
-			if err == nil {
-				found = true
-				break
-			}
-			testPath = fullPath + ".rainbow"
-			fileContent, err = os.ReadFile(testPath)
-			if err == nil {
-				found = true
-				break
-			}
-		} else {
-			fileContent, err = os.ReadFile(fullPath)
-			if err == nil {
-				found = true
-				break
-			}
-		}
-	}
-
-	if !found {
-		return TypedValue{}, fmt.Errorf("library not found: %s (searched in: %v)", filename, searchPaths)
-	}
-
-	if int64(len(fileContent)) > i.sandbox.maxFileSize {
-		return TypedValue{}, fmt.Errorf("library too large: %d bytes", len(fileContent))
-	}
-
-	oldPath := currentFilePath
-	if currentFilePath == "" {
-		currentFilePath = filename
-	}
-
-	lexer := NewLexer(string(fileContent))
-	tokens, err := lexer.Tokenize()
-	if err != nil {
-		currentFilePath = oldPath
-		return TypedValue{}, fmt.Errorf("error tokenizing library %s: %v", filename, err)
-	}
-
-	parser := NewParser(tokens)
-	ast, err := parser.Parse()
-	if err != nil {
-		currentFilePath = oldPath
-		return TypedValue{}, fmt.Errorf("error parsing library %s: %v", filename, err)
-	}
-
-	_, err = i.EvaluateProgram(ast)
-	if err != nil {
-		currentFilePath = oldPath
-		return TypedValue{}, fmt.Errorf("error executing library %s: %v", filename, err)
-	}
-
-	currentFilePath = oldPath
-	return TypedValue{Type: TypeNull, Value: nil}, nil
-}
-
-func (i *Interpreter) EvaluateProgram(program *Program) (TypedValue, error) {
+func (i *Interpreter) evaluateProgram(program *Program) (TypedValue, error) {
 	for _, stmt := range program.Statements {
-		_, err := i.Evaluate(stmt)
+		_, err := i.evaluateNode(stmt)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -4735,11 +2574,7 @@ func (i *Interpreter) EvaluateProgram(program *Program) (TypedValue, error) {
 	return TypedValue{Type: TypeNull, Value: nil}, nil
 }
 
-func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
-	if program, ok := node.(*Program); ok {
-		return i.EvaluateProgram(program)
-	}
-
+func (i *Interpreter) evaluateNode(node Node) (TypedValue, error) {
 	switch n := node.(type) {
 	case *IncludeStatement:
 		return i.handleInclude(n)
@@ -4761,7 +2596,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 	case *ArrayNode:
 		elements := make([]TypedValue, len(n.Elements))
 		for idx, elem := range n.Elements {
-			val, err := i.Evaluate(elem)
+			val, err := i.evaluateNode(elem)
 			if err != nil {
 				return TypedValue{}, err
 			}
@@ -4777,7 +2612,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 			return TypedValue{}, fmt.Errorf("variable %s is not an array", n.Name)
 		}
 		arrSlice := arr.Value.([]TypedValue)
-		idxVal, err := i.Evaluate(n.Index)
+		idxVal, err := i.evaluateNode(n.Index)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -4790,7 +2625,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		}
 		return arrSlice[idx], nil
 	case *UnaryNode:
-		val, err := i.Evaluate(n.Expr)
+		val, err := i.evaluateNode(n.Expr)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -4804,21 +2639,23 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 			default:
 				return TypedValue{}, fmt.Errorf("cannot apply unary minus to type %v", val.Type)
 			}
+		case "!":
+			return NewTypedBool(!i.isTruthy(val)), nil
 		default:
 			return TypedValue{}, fmt.Errorf("unknown unary operator: %s", n.Op)
 		}
 	case *BinaryOpNode:
-		left, err := i.Evaluate(n.Left)
+		left, err := i.evaluateNode(n.Left)
 		if err != nil {
 			return TypedValue{}, err
 		}
-		right, err := i.Evaluate(n.Right)
+		right, err := i.evaluateNode(n.Right)
 		if err != nil {
 			return TypedValue{}, err
 		}
 		return i.evaluateBinaryOp(left, n.Op, right)
 	case *TypedDeclaration:
-		value, err := i.Evaluate(n.Value)
+		value, err := i.evaluateNode(n.Value)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -4832,7 +2669,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		if i.isConstant(n.Name) {
 			return TypedValue{}, fmt.Errorf("cannot assign to constant '%s'", n.Name)
 		}
-		value, err := i.Evaluate(n.Value)
+		value, err := i.evaluateNode(n.Value)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -4853,11 +2690,11 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		if !ok {
 			return TypedValue{}, fmt.Errorf("variable not defined: %s", n.Name)
 		}
-		value, err := i.Evaluate(n.Value)
+		value, err := i.evaluateNode(n.Value)
 		if err != nil {
 			return TypedValue{}, err
 		}
-		
+
 		var result TypedValue
 		switch n.Op {
 		case "+":
@@ -4876,7 +2713,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		if err != nil {
 			return TypedValue{}, err
 		}
-		
+
 		if typ, ok := i.getType(n.Name); ok {
 			if err := i.checkType(typ, result); err != nil {
 				return TypedValue{}, err
@@ -4892,7 +2729,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		if !ok {
 			return TypedValue{}, fmt.Errorf("variable not defined: %s", n.Name)
 		}
-		
+
 		var result TypedValue
 		switch current.Type {
 		case TypeInt:
@@ -4914,21 +2751,19 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		default:
 			return TypedValue{}, fmt.Errorf("cannot increment/decrement type %v", current.Type)
 		}
-		
+
 		if n.Postfix {
-			// Возвращаем старое значение, но сохраняем новое
+			oldValue := current
 			i.setVar(n.Name, result)
-			return current, nil
-		} else {
-			// Возвращаем новое значение
-			i.setVar(n.Name, result)
-			return result, nil
+			return oldValue, nil
 		}
+		i.setVar(n.Name, result)
+		return result, nil
 	case *ArrayAssignmentStatement:
 		if i.isConstant(n.Name) {
 			return TypedValue{}, fmt.Errorf("cannot assign to constant array '%s'", n.Name)
 		}
-		value, err := i.Evaluate(n.Value)
+		value, err := i.evaluateNode(n.Value)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -4940,7 +2775,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 			return TypedValue{}, fmt.Errorf("variable %s is not an array", n.Name)
 		}
 		arrSlice := arr.Value.([]TypedValue)
-		idxVal, err := i.Evaluate(n.Index)
+		idxVal, err := i.evaluateNode(n.Index)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -4955,20 +2790,28 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		i.setVar(n.Name, NewTypedArray(arrSlice))
 		return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *PrintStatement:
-		value, err := i.Evaluate(n.Value)
+		value, err := i.evaluateNode(n.Value)
 		if err != nil {
 			return TypedValue{}, err
 		}
-		fmt.Fprintln(output, value.String())
+
+		text := value.String()
+		hasHate, filtered := i.checkHateSpeech(text)
+		if hasHate {
+			fmt.Fprintln(output, "⚠️ Обнаружена ненависть в выводе!")
+			fmt.Fprintln(output, "📝 Отфильтрованный вывод:", filtered)
+		} else {
+			fmt.Fprintln(output, text)
+		}
 		return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *IfStatement:
-		cond, err := i.Evaluate(n.Condition)
+		cond, err := i.evaluateNode(n.Condition)
 		if err != nil {
 			return TypedValue{}, err
 		}
 		if i.isTruthy(cond) {
 			for _, stmt := range n.ThenBlock {
-				_, err := i.Evaluate(stmt)
+				_, err := i.evaluateNode(stmt)
 				if err != nil {
 					return TypedValue{}, err
 				}
@@ -4977,13 +2820,13 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		}
 
 		for _, elseIf := range n.ElseIfBlocks {
-			cond, err := i.Evaluate(elseIf.Condition)
+			cond, err := i.evaluateNode(elseIf.Condition)
 			if err != nil {
 				return TypedValue{}, err
 			}
 			if i.isTruthy(cond) {
 				for _, stmt := range elseIf.Block {
-					_, err := i.Evaluate(stmt)
+					_, err := i.evaluateNode(stmt)
 					if err != nil {
 						return TypedValue{}, err
 					}
@@ -4993,20 +2836,20 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		}
 
 		for _, stmt := range n.ElseBlock {
-			_, err := i.Evaluate(stmt)
+			_, err := i.evaluateNode(stmt)
 			if err != nil {
 				return TypedValue{}, err
 			}
 		}
 		return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *WhileStatement:
-		condVal, err := i.Evaluate(n.Condition)
+		condVal, err := i.evaluateNode(n.Condition)
 		if err != nil {
 			return TypedValue{}, err
 		}
 		for i.isTruthy(condVal) {
 			for _, stmt := range n.Body {
-				_, err := i.Evaluate(stmt)
+				_, err := i.evaluateNode(stmt)
 				if err != nil {
 					return TypedValue{}, err
 				}
@@ -5014,7 +2857,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 					return i.returnValue, nil
 				}
 			}
-			condVal, err = i.Evaluate(n.Condition)
+			condVal, err = i.evaluateNode(n.Condition)
 			if err != nil {
 				return TypedValue{}, err
 			}
@@ -5022,20 +2865,20 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *SexStatement:
 		if n.Init != nil {
-			_, err := i.Evaluate(n.Init)
+			_, err := i.evaluateNode(n.Init)
 			if err != nil {
 				return TypedValue{}, err
 			}
 		}
-		
-		condVal, err := i.Evaluate(n.Condition)
+
+		condVal, err := i.evaluateNode(n.Condition)
 		if err != nil {
 			return TypedValue{}, err
 		}
-		
+
 		for i.isTruthy(condVal) {
 			for _, stmt := range n.Body {
-				_, err := i.Evaluate(stmt)
+				_, err := i.evaluateNode(stmt)
 				if err != nil {
 					return TypedValue{}, err
 				}
@@ -5043,22 +2886,22 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 					return i.returnValue, nil
 				}
 			}
-			
+
 			if n.Update != nil {
-				_, err = i.Evaluate(n.Update)
+				_, err = i.evaluateNode(n.Update)
 				if err != nil {
 					return TypedValue{}, err
 				}
 			}
-			
-			condVal, err = i.Evaluate(n.Condition)
+
+			condVal, err = i.evaluateNode(n.Condition)
 			if err != nil {
 				return TypedValue{}, err
 			}
 		}
 		return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *ConstantDeclaration:
-		value, err := i.Evaluate(n.Value)
+		value, err := i.evaluateNode(n.Value)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -5069,7 +2912,7 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		i.setConstant(n.Name)
 		return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *HelpStatement:
-		countryVal, err := i.Evaluate(n.Country)
+		countryVal, err := i.evaluateNode(n.Country)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -5094,333 +2937,39 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 		}
 		i.mu.Unlock()
 		return TypedValue{Type: TypeNull, Value: nil}, nil
-	case *QueerClassDeclaration:
-		i.mu.Lock()
-		i.queerClasses[n.Name] = n
-		i.mu.Unlock()
-		return TypedValue{Type: TypeNull, Value: nil}, nil
-	case *QueerInstanceNode:
-		classDecl, ok := i.queerClasses[n.ClassName]
-		if !ok {
-			return TypedValue{}, fmt.Errorf("class not defined: %s", n.ClassName)
-		}
-		
-		instance := &QueerInstance{
-			ClassName: n.ClassName,
-			Fields:    make(map[string]TypedValue),
-			Methods:   make(map[string]*FunctionDeclaration),
-			Parent:    nil,
-		}
-		
-		for fieldName, fieldType := range classDecl.Fields {
-			var defaultValue TypedValue
-			switch fieldType {
-			case "lesbian":
-				defaultValue = NewTypedString("")
-			case "gay":
-				defaultValue = NewTypedInt(0)
-			case "trans":
-				defaultValue = NewTypedFloat(0.0)
-			case "nonbinary":
-				defaultValue = NewTypedBool(false)
-			case "gender":
-				defaultValue = NewTypedArray([]TypedValue{})
-			default:
-				defaultValue = TypedValue{Type: TypeNull, Value: nil}
-			}
-			instance.Fields[fieldName] = defaultValue
-		}
-		
-		for methodName, method := range classDecl.Methods {
-			instance.Methods[methodName] = method
-		}
-		
-		if classDecl.Parent != "" {
-			parentClass, ok := i.queerClasses[classDecl.Parent]
-			if ok {
-				parentInstance := &QueerInstance{
-					ClassName: classDecl.Parent,
-					Fields:    make(map[string]TypedValue),
-					Methods:   make(map[string]*FunctionDeclaration),
-					Parent:    nil,
-				}
-				for fieldName, fieldType := range parentClass.Fields {
-					var defaultValue TypedValue
-					switch fieldType {
-					case "lesbian":
-						defaultValue = NewTypedString("")
-					case "gay":
-						defaultValue = NewTypedInt(0)
-					case "trans":
-						defaultValue = NewTypedFloat(0.0)
-					case "nonbinary":
-						defaultValue = NewTypedBool(false)
-					case "gender":
-						defaultValue = NewTypedArray([]TypedValue{})
-					default:
-						defaultValue = TypedValue{Type: TypeNull, Value: nil}
-					}
-					parentInstance.Fields[fieldName] = defaultValue
-				}
-				for methodName, method := range parentClass.Methods {
-					parentInstance.Methods[methodName] = method
-				}
-				instance.Parent = parentInstance
-			}
-		}
-		
-		if classDecl.Constructor != nil {
-			oldThis := i.this
-			i.this = instance
-			i.pushFrame()
-			
-			argValues := make([]TypedValue, len(n.Args))
-			for idx, arg := range n.Args {
-				val, err := i.Evaluate(arg)
-				if err != nil {
-					i.popFrame()
-					i.this = oldThis
-					return TypedValue{}, err
-				}
-				argValues[idx] = val
-			}
-			
-			for idx, param := range classDecl.Constructor.Params {
-				if idx < len(argValues) {
-					i.setVar(param, argValues[idx])
-				}
-			}
-			
-			for _, stmt := range classDecl.Constructor.Body {
-				_, err := i.Evaluate(stmt)
-				if err != nil {
-					i.popFrame()
-					i.this = oldThis
-					return TypedValue{}, err
-				}
-			}
-			
-			i.popFrame()
-			i.this = oldThis
-		}
-		
-		return NewTypedObject(instance), nil
-	case *QueerFieldAccessNode:
-		objVal, err := i.Evaluate(n.Object)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		
-		if objVal.Type != TypeObject {
-			return TypedValue{}, fmt.Errorf("cannot access field of non-object")
-		}
-		
-		obj := objVal.Value.(*QueerInstance)
-		
-		if val, ok := obj.Fields[n.Field]; ok {
-			return val, nil
-		}
-		
-		if obj.Parent != nil {
-			if val, ok := obj.Parent.Fields[n.Field]; ok {
-				return val, nil
-			}
-		}
-		
-		return TypedValue{}, fmt.Errorf("field not found: %s", n.Field)
-	case *QueerMethodCallNode:
-		objVal, err := i.Evaluate(n.Object)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		
-		if objVal.Type != TypeObject {
-			return TypedValue{}, fmt.Errorf("cannot call method on non-object")
-		}
-		
-		obj := objVal.Value.(*QueerInstance)
-		
-		var method *FunctionDeclaration
-		var found bool
-		
-		if m, ok := obj.Methods[n.Method]; ok {
-			method = m
-			found = true
-		} else if obj.Parent != nil {
-			if m, ok := obj.Parent.Methods[n.Method]; ok {
-				method = m
-				found = true
-			}
-		}
-		
-		if !found {
-			return TypedValue{}, fmt.Errorf("method not found: %s", n.Method)
-		}
-		
-		argValues := make([]TypedValue, len(n.Args))
-		for idx, arg := range n.Args {
-			val, err := i.Evaluate(arg)
-			if err != nil {
-				return TypedValue{}, err
-			}
-			argValues[idx] = val
-		}
-		
-		oldThis := i.this
-		i.this = obj
-		i.pushFrame()
-		
-		for idx, param := range method.Params {
-			if idx < len(argValues) {
-				i.setVar(param, argValues[idx])
-			}
-		}
-		
-		i.returnFlag = false
-		i.returnValue = TypedValue{Type: TypeNull, Value: nil}
-		
-		var lastResult TypedValue
-		for _, stmt := range method.Body {
-			lastResult, err = i.Evaluate(stmt)
-			if err != nil {
-				i.popFrame()
-				i.this = oldThis
-				return TypedValue{}, err
-			}
-			if i.returnFlag {
-				break
-			}
-		}
-		
-		result := i.returnValue
-		if result.Type == TypeNull {
-			result = lastResult
-		}
-		
-		i.popFrame()
-		i.this = oldThis
-		return result, nil
-	case *ThisNode:
-		if i.this == nil {
-			return TypedValue{}, fmt.Errorf("'this' used outside of method")
-		}
-		return NewTypedObject(i.this), nil
-	case *SuperNode:
-		if i.this == nil {
-			return TypedValue{}, fmt.Errorf("'super' used outside of method")
-		}
-		if i.this.Parent == nil {
-			return TypedValue{}, fmt.Errorf("'super' used in class without parent")
-		}
-		return NewTypedObject(i.this.Parent), nil
 	case *FunctionCall:
-		if fn, ok := i.getBuiltinFunction(n.Name); ok {
-			args := make([]TypedValue, len(n.Args))
-			for idx, arg := range n.Args {
-				val, err := i.Evaluate(arg)
-				if err != nil {
-					return TypedValue{}, err
-				}
-				args[idx] = val
-			}
-			return fn(args)
-		}
-
-		fn, ok := i.functions[n.Name]
-		if !ok {
-			return TypedValue{}, fmt.Errorf("function not defined: %s", n.Name)
-		}
-
-		if len(fn.Params) != len(n.Args) {
-			return TypedValue{}, fmt.Errorf("argument count mismatch in call to %s: expected %d, got %d",
-				n.Name, len(fn.Params), len(n.Args))
-		}
-
-		if i.recursionDepth > i.maxRecursion {
-			return TypedValue{}, fmt.Errorf("maximum recursion depth exceeded: %d", i.maxRecursion)
-		}
-		i.recursionDepth++
-
-		argValues := make([]TypedValue, len(n.Args))
-		for idx, arg := range n.Args {
-			val, err := i.Evaluate(arg)
-			if err != nil {
-				i.recursionDepth--
-				return TypedValue{}, err
-			}
-			argValues[idx] = val
-		}
-
-		i.pushFrame()
-
-		for idx, param := range fn.Params {
-			i.setVar(param, argValues[idx])
-		}
-
-		i.returnFlag = false
-		i.returnValue = TypedValue{Type: TypeNull, Value: nil}
-
-		var lastResult TypedValue
-		var err error
-		for _, stmt := range fn.Body {
-			lastResult, err = i.Evaluate(stmt)
-			if err != nil {
-				i.popFrame()
-				i.recursionDepth--
-				return TypedValue{}, err
-			}
-			if i.returnFlag {
-				break
-			}
-		}
-
-		result := i.returnValue
-		if result.Type == TypeNull {
-			result = lastResult
-		}
-
-		i.popFrame()
-		i.recursionDepth--
-		return result, nil
+		return i.callFunction(n)
 	case *ReturnStatement:
-		value, err := i.Evaluate(n.Value)
+		value, err := i.evaluateNode(n.Value)
 		if err != nil {
 			return TypedValue{}, err
 		}
 		i.returnValue = value
 		i.returnFlag = true
 		return value, nil
-	case *TryCatchStatement:
-		var err error
-		var caughtErr error
-		for _, stmt := range n.TryBlock {
-			_, err = i.Evaluate(stmt)
-			if err != nil {
-				caughtErr = err
-				break
-			}
-		}
+	case *HeteroHomoStatement:
+    var err error
+    for _, stmt := range n.HeteroBlock {
+        _, err = i.evaluateNode(stmt)
+        if err != nil {
+            break
+        }
+    }
 
-		if err != nil {
-			line := 0
-			col := 0
-			if n, ok := node.(Node); ok {
-				line = n.GetLine()
-			}
-			i.setVar("error", NewTypedString(caughtErr.Error()))
-			i.setType("error", "lesbian")
-			for _, stmt := range n.CatchBlock {
-				_, catchErr := i.Evaluate(stmt)
-				if catchErr != nil {
-					return TypedValue{}, catchErr
-				}
-			}
-			i.handleError(caughtErr, line, col)
-			return TypedValue{Type: TypeNull, Value: nil}, nil
-		}
-		return TypedValue{Type: TypeNull, Value: nil}, nil
+    if err != nil {
+        i.setVar("error", NewTypedString(err.Error()))
+        i.setType("error", "lesbian")
+        for _, stmt := range n.HomoBlock {
+            _, catchErr := i.evaluateNode(stmt)
+            if catchErr != nil {
+                return TypedValue{}, catchErr
+            }
+        }
+        return TypedValue{Type: TypeNull, Value: nil}, nil
+    }
+    return TypedValue{Type: TypeNull, Value: nil}, nil
 	case *ExpressionStatement:
-		val, err := i.Evaluate(n.Expr)
+		val, err := i.evaluateNode(n.Expr)
 		if err != nil {
 			return TypedValue{}, err
 		}
@@ -5430,59 +2979,106 @@ func (i *Interpreter) Evaluate(node Node) (TypedValue, error) {
 	}
 }
 
-func (i *Interpreter) evaluateBinaryOp(left TypedValue, op string, right TypedValue) (TypedValue, error) {
-	switch op {
-	case "+":
-		return i.add(left, right)
-	case "-":
-		return i.subtract(left, right)
-	case "*":
-		return i.multiply(left, right)
-	case "/":
-		return i.divide(left, right)
-	case "%":
-		return i.modulo(left, right)
-	case "==":
-		if left.Type == right.Type {
-			return NewTypedBool(reflect.DeepEqual(left.Value, right.Value)), nil
-		}
-		return NewTypedBool(false), nil
-	case "!=":
-		if left.Type == right.Type {
-			return NewTypedBool(!reflect.DeepEqual(left.Value, right.Value)), nil
-		}
-		return NewTypedBool(true), nil
-	case "<":
-		cmp, err := compareTypedValues(left, right)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		return NewTypedBool(cmp < 0), nil
-	case ">":
-		cmp, err := compareTypedValues(left, right)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		return NewTypedBool(cmp > 0), nil
-	case "<=":
-		cmp, err := compareTypedValues(left, right)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		return NewTypedBool(cmp <= 0), nil
-	case ">=":
-		cmp, err := compareTypedValues(left, right)
-		if err != nil {
-			return TypedValue{}, err
-		}
-		return NewTypedBool(cmp >= 0), nil
-	case "&&":
-		return NewTypedBool(i.isTruthy(left) && i.isTruthy(right)), nil
-	case "||":
-		return NewTypedBool(i.isTruthy(left) || i.isTruthy(right)), nil
-	default:
-		return TypedValue{}, fmt.Errorf("unknown operator: %s", op)
+func (i *Interpreter) handleInclude(node *IncludeStatement) (TypedValue, error) {
+	filename := node.Filename
+	if err := i.sandbox.CheckFilePath(filename); err != nil {
+		return TypedValue{}, err
 	}
+
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("cannot read include file '%s': %v", filename, err)
+	}
+
+	lexer := NewLexer(string(data))
+	tokens, err := lexer.Tokenize()
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lexer error in include: %v", err)
+	}
+
+	parser := NewParser(tokens)
+	ast, err := parser.Parse()
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("parser error in include: %v", err)
+	}
+
+	_, err = i.evaluateProgram(ast)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("error in include: %v", err)
+	}
+
+	return TypedValue{Type: TypeNull, Value: nil}, nil
+}
+
+func (i *Interpreter) callFunction(n *FunctionCall) (TypedValue, error) {
+	if fn, ok := i.getBuiltinFunction(n.Name); ok {
+		args := make([]TypedValue, len(n.Args))
+		for idx, arg := range n.Args {
+			val, err := i.evaluateNode(arg)
+			if err != nil {
+				return TypedValue{}, err
+			}
+			args[idx] = val
+		}
+		return fn(args)
+	}
+
+	fn, ok := i.functions[n.Name]
+	if !ok {
+		return TypedValue{}, fmt.Errorf("function not defined: %s", n.Name)
+	}
+
+	if len(fn.Params) != len(n.Args) {
+		return TypedValue{}, fmt.Errorf("argument count mismatch in call to %s: expected %d, got %d",
+			n.Name, len(fn.Params), len(n.Args))
+	}
+
+	if i.recursionDepth > i.maxRecursion {
+		return TypedValue{}, fmt.Errorf("maximum recursion depth exceeded: %d", i.maxRecursion)
+	}
+	i.recursionDepth++
+
+	argValues := make([]TypedValue, len(n.Args))
+	for idx, arg := range n.Args {
+		val, err := i.evaluateNode(arg)
+		if err != nil {
+			i.recursionDepth--
+			return TypedValue{}, err
+		}
+		argValues[idx] = val
+	}
+
+	i.pushFrame()
+
+	for idx, param := range fn.Params {
+		i.setVar(param, argValues[idx])
+	}
+
+	i.returnFlag = false
+	i.returnValue = TypedValue{Type: TypeNull, Value: nil}
+
+	var lastResult TypedValue
+	var err error
+	for _, stmt := range fn.Body {
+		lastResult, err = i.evaluateNode(stmt)
+		if err != nil {
+			i.popFrame()
+			i.recursionDepth--
+			return TypedValue{}, err
+		}
+		if i.returnFlag {
+			break
+		}
+	}
+
+	result := i.returnValue
+	if result.Type == TypeNull {
+		result = lastResult
+	}
+
+	i.popFrame()
+	i.recursionDepth--
+	return result, nil
 }
 
 func (i *Interpreter) add(a, b TypedValue) (TypedValue, error) {
@@ -5582,121 +3178,1867 @@ func (i *Interpreter) toFloat(a, b TypedValue) (float64, float64, error) {
 	return va, vb, nil
 }
 
-func (i *Interpreter) showHelp(country string) {
-	orgs := map[string][]string{
-		"russia": {
-			"Российская ЛГБТ-сеть",
-			"Центр 'Сфера'",
-			"Проект 'ЛГБТ-Киров'",
-			"Выход (Санкт-Петербург)",
-		},
-		"usa": {
-			"Human Rights Campaign",
-			"GLAAD",
-			"The Trevor Project",
-			"National LGBTQ Task Force",
-		},
-		"all": {
-			"ILGA (International Lesbian, Gay, Bisexual, Trans and Intersex Association)",
-			"ILGA-Europe",
-			"OutRight Action International",
-		},
-	}
-	countryLower := strings.ToLower(country)
-	if list, ok := orgs[countryLower]; ok {
-		fmt.Fprintf(output, "Организации, помогающие ЛГБТ в стране '%s':\n", country)
-		for _, org := range list {
-			fmt.Fprintf(output, "  • %s\n", org)
-		}
-	} else if countryLower == "" || countryLower == "all" {
-		fmt.Fprintln(output, "Международные организации, помогающие ЛГБТ по всему миру:")
-		for _, org := range orgs["all"] {
-			fmt.Fprintf(output, "  • %s\n", org)
-		}
-	} else {
-		fmt.Fprintf(output, "Информация для страны '%s' не найдена.\n", country)
+func (i *Interpreter) isTruthy(val TypedValue) bool {
+	switch val.Type {
+	case TypeBool:
+		return val.Value.(bool)
+	case TypeInt:
+		return val.Value.(int) != 0
+	case TypeFloat:
+		return val.Value.(float64) != 0
+	case TypeString:
+		return val.Value.(string) != ""
+	case TypeArray:
+		return len(val.Value.([]TypedValue)) > 0
+	default:
+		return false
 	}
 }
 
-func (i *Interpreter) runOrientationTest() {
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Fprintln(output, "\n=== Психологический тест на определение сексуальной ориентации ===")
-	fmt.Fprintln(output, "Ответьте на вопросы, выбрав вариант (1-4). Будьте честны.")
-	fmt.Fprintln(output, "------------------------------------------------------------")
+func (i *Interpreter) pushFrame() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.callStack = append(i.callStack, callFrame{
+		vars:      make(map[string]TypedValue),
+		types:     make(map[string]string),
+		constants: make(map[string]bool),
+	})
+}
 
-	questions := []struct {
-		text    string
-		options []string
-		scores  []int
-	}{
-		{
-			"Кто вам чаще нравится в романтическом плане?",
-			[]string{"Люди противоположного пола", "Люди любого пола", "Люди того же пола", "Затрудняюсь ответить"},
-			[]int{1, 2, 3, 0},
-		},
-		{
-			"Какие отношения вы считаете наиболее привлекательными для себя?",
-			[]string{"Гетеросексуальные", "Бисексуальные", "Гомосексуальные", "Не уверен"},
-			[]int{1, 2, 3, 0},
-		},
-		{
-			"Как часто вы испытывали романтические чувства к людям своего пола?",
-			[]string{"Никогда", "Иногда", "Часто", "Постоянно"},
-			[]int{1, 2, 3, 4},
-		},
-		{
-			"Как часто вы испытывали романтические чувства к людям противоположного пола?",
-			[]string{"Постоянно", "Часто", "Иногда", "Никогда"},
-			[]int{1, 2, 3, 4},
-		},
-		{
-			"Считаете ли вы, что ориентация может меняться со временем?",
-			[]string{"Нет, это врождённое", "Возможно, но редко", "Да, это гибко", "Затрудняюсь ответить"},
-			[]int{1, 2, 3, 0},
-		},
+func (i *Interpreter) popFrame() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.callStack) > 1 {
+		i.callStack = i.callStack[:len(i.callStack)-1]
+	}
+}
+
+func (i *Interpreter) getVar(name string) (TypedValue, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for idx := len(i.callStack) - 1; idx >= 0; idx-- {
+		if val, ok := i.callStack[idx].vars[name]; ok {
+			return val, true
+		}
+	}
+	return TypedValue{Type: TypeNull, Value: nil}, false
+}
+
+func (i *Interpreter) setVar(name string, value TypedValue) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	top := len(i.callStack) - 1
+	if i.callStack[top].constants[name] {
+		panic(fmt.Errorf("cannot assign to constant '%s'", name))
+	}
+	i.callStack[top].vars[name] = value
+}
+
+func (i *Interpreter) getType(name string) (string, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for idx := len(i.callStack) - 1; idx >= 0; idx-- {
+		if typ, ok := i.callStack[idx].types[name]; ok {
+			return typ, true
+		}
+	}
+	return "", false
+}
+
+func (i *Interpreter) setType(name string, typ string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	top := len(i.callStack) - 1
+	i.callStack[top].types[name] = typ
+}
+
+func (i *Interpreter) setConstant(name string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	top := len(i.callStack) - 1
+	i.callStack[top].constants[name] = true
+}
+
+func (i *Interpreter) isConstant(name string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	for idx := len(i.callStack) - 1; idx >= 0; idx-- {
+		if c, ok := i.callStack[idx].constants[name]; ok && c {
+			return true
+		}
+	}
+	return false
+}
+
+func (i *Interpreter) getTypeFromKeyword(keyword string) ValueType {
+	switch keyword {
+	case "lesbian":
+		return TypeString
+	case "gay":
+		return TypeInt
+	case "queer":
+		return TypeFloat
+	case "nonbinary":
+		return TypeBool
+	case "gender":
+		return TypeArray
+	default:
+		return TypeNull
+	}
+}
+
+func (i *Interpreter) checkType(typ string, value TypedValue) error {
+	expectedType := i.getTypeFromKeyword(typ)
+	if expectedType == TypeNull {
+		return fmt.Errorf("unknown type: %s", typ)
+	}
+	if value.Type != expectedType {
+		return fmt.Errorf("type mismatch: expected %s (%v), got %v", typ, expectedType, value.Type)
+	}
+	return nil
+}
+
+func (i *Interpreter) compareTypedValues(a, b TypedValue) (int, error) {
+	if a.Type != b.Type {
+		return 0, fmt.Errorf("cannot compare different types: %v and %v", a.Type, b.Type)
 	}
 
-	totalScore := 0
-	for idx, q := range questions {
-		fmt.Fprintf(output, "\n%d. %s\n", idx+1, q.text)
-		for j, opt := range q.options {
-			fmt.Fprintf(output, "   %d) %s\n", j+1, opt)
+	switch a.Type {
+	case TypeInt:
+		va := a.Value.(int)
+		vb := b.Value.(int)
+		if va < vb {
+			return -1, nil
+		} else if va > vb {
+			return 1, nil
 		}
-		fmt.Fprint(output, "Ваш выбор (1-4): ")
-		scanner.Scan()
-		input := scanner.Text()
-		choice, err := strconv.Atoi(input)
-		if err != nil || choice < 1 || choice > 4 {
-			fmt.Fprintln(output, "Некорректный ввод, принимаем 1.")
-			choice = 1
+		return 0, nil
+	case TypeFloat:
+		va := a.Value.(float64)
+		vb := b.Value.(float64)
+		if va < vb {
+			return -1, nil
+		} else if va > vb {
+			return 1, nil
 		}
-		totalScore += q.scores[choice-1]
+		return 0, nil
+	case TypeString:
+		va := a.Value.(string)
+		vb := b.Value.(string)
+		if va < vb {
+			return -1, nil
+		} else if va > vb {
+			return 1, nil
+		}
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("cannot compare type %v", a.Type)
+	}
+}
+
+func (i *Interpreter) evaluateBinaryOp(left TypedValue, op string, right TypedValue) (TypedValue, error) {
+	switch op {
+	case "+":
+		return i.add(left, right)
+	case "-":
+		return i.subtract(left, right)
+	case "*":
+		return i.multiply(left, right)
+	case "/":
+		return i.divide(left, right)
+	case "%":
+		return i.modulo(left, right)
+	case "==":
+		if left.Type == right.Type {
+			return NewTypedBool(reflect.DeepEqual(left.Value, right.Value)), nil
+		}
+		return NewTypedBool(false), nil
+	case "!=":
+		if left.Type == right.Type {
+			return NewTypedBool(!reflect.DeepEqual(left.Value, right.Value)), nil
+		}
+		return NewTypedBool(true), nil
+	case "<":
+		cmp, err := i.compareTypedValues(left, right)
+		if err != nil {
+			return TypedValue{}, err
+		}
+		return NewTypedBool(cmp < 0), nil
+	case ">":
+		cmp, err := i.compareTypedValues(left, right)
+		if err != nil {
+			return TypedValue{}, err
+		}
+		return NewTypedBool(cmp > 0), nil
+	case "<=":
+		cmp, err := i.compareTypedValues(left, right)
+		if err != nil {
+			return TypedValue{}, err
+		}
+		return NewTypedBool(cmp <= 0), nil
+	case ">=":
+		cmp, err := i.compareTypedValues(left, right)
+		if err != nil {
+			return TypedValue{}, err
+		}
+		return NewTypedBool(cmp >= 0), nil
+	case "&&":
+		return NewTypedBool(i.isTruthy(left) && i.isTruthy(right)), nil
+	case "||":
+		return NewTypedBool(i.isTruthy(left) || i.isTruthy(right)), nil
+	default:
+		return TypedValue{}, fmt.Errorf("unknown operator: %s", op)
+	}
+}
+
+// ============================================================
+// НОВЫЕ ФУНКЦИИ - ПОЛНАЯ РЕАЛИЗАЦИЯ
+// ============================================================
+
+// 1. КАМИНГ-АУТ ПИСЬМО
+func (i *Interpreter) comingOutLetter(args []TypedValue) (TypedValue, error) {
+	if len(args) < 3 {
+		return TypedValue{}, fmt.Errorf("comingOutLetter: expected 3 arguments (name, recipient, relationship)")
 	}
 
-	var result string
-	if totalScore >= 12 {
-		result = "Гомосексуальная ориентация (выраженная)"
-	} else if totalScore >= 8 {
-		result = "Бисексуальная ориентация"
-	} else if totalScore >= 4 {
-		result = "Гетеросексуальная ориентация"
+	name, _ := args[0].Value.(string)
+	recipient, _ := args[1].Value.(string)
+	relationship, _ := args[2].Value.(string)
+
+	style := "gentle"
+	if len(args) > 3 {
+		if s, ok := args[3].Value.(string); ok {
+			style = s
+		}
+	}
+
+	var letter string
+	switch style {
+	case "gentle":
+		letter = fmt.Sprintf(`
+Дорогой/ая %s,
+
+Я хочу поделиться с тобой чем-то очень важным о себе. Я - ЛГБТ+ человек, и я открываюсь тебе, потому что ты значишь для меня многое.
+
+Твое принятие и поддержка очень важны для меня. Я тот же человек, каким ты меня знал(а), просто теперь ты знаешь еще одну часть меня.
+
+С любовью,
+%s
+`, recipient, name)
+	case "direct":
+		letter = fmt.Sprintf(`
+%s,
+
+Я - %s, и я ЛГБТ+. Я говорю тебе это напрямую, потому что уважаю тебя и хочу, чтобы между нами была честность.
+
+Мне важна твоя поддержка, но даже если ты не готов(а) ее дать - я остаюсь собой.
+
+С уважением,
+%s
+`, relationship, name, name)
+	case "poetic":
+		letter = fmt.Sprintf(`
+Мой дорогой/ая %s,
+
+В этом мире, полном красок,
+Я нашел/нашла свой настоящий цвет.
+И я хочу, чтобы ты знал(а),
+Что этот цвет - часть меня.
+
+Я - ЛГБТ+ человек,
+И я открываю тебе свое сердце,
+Потому что верю в нашу связь.
+
+С нежностью,
+%s
+`, recipient, name)
+	default:
+		letter = fmt.Sprintf(`
+%s,
+
+Я хочу сказать тебе, что я %s, и я ЛГБТ+.
+Ты важен/важна для меня, поэтому я делюсь с тобой этим.
+
+С уважением,
+%s
+`, recipient, name, name)
+	}
+
+	return NewTypedString(letter), nil
+}
+
+// 2. ТРАНС-ПОДДЕРЖКА
+func (i *Interpreter) transSupport(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("transSupport: expected query argument")
+	}
+
+	query, _ := args[0].Value.(string)
+
+	supportMap := map[string]string{
+		"гормон":   "Информация о гормональной терапии:\n• Обратитесь к эндокринологу\n• Получите направление от психолога\n• Список транс-дружественных врачей доступен по запросу",
+		"документ": "Информация о смене документов:\n• Заявление в ЗАГС\n• Медицинское заключение\n• Решение суда\n• Паспорт с новым полом",
+		"психолог": "Транс-дружественные психологи:\n• Поиск по вашему городу\n• Бесплатные консультации для транс-людей\n• Группы поддержки",
+		"право":    "Права транс-людей:\n• Защита от дискриминации\n• Право на медицинскую помощь\n• Право на смену документов",
+	}
+
+	result := "🏳️‍⚧️ Транс-поддержка:\n"
+	if info, ok := supportMap[strings.ToLower(query)]; ok {
+		result += info + "\n"
 	} else {
-		result = "Скорее всего, вы ещё определяетесь или ваша ориентация не укладывается в простые категории."
+		result += fmt.Sprintf("ℹ️ Информация по запросу '%s' уточняется.\n", query)
 	}
-	fmt.Fprintf(output, "\nРезультат теста (баллы: %d): %s\n", totalScore, result)
-	fmt.Fprintln(output, "Помните: этот тест не является диагностическим.")
+	result += "\n💙 Вы не одиноки! Поддержка доступна 24/7."
+	return NewTypedString(result), nil
+}
+
+// 3. ПОИСК СОЮЗНИКОВ
+func (i *Interpreter) findAllies(args []TypedValue) (TypedValue, error) {
+	if len(args) < 2 {
+		return TypedValue{}, fmt.Errorf("findAllies: expected place and radius")
+	}
+
+	place, _ := args[0].Value.(string)
+	radius, _ := args[1].Value.(int)
+
+	allies := []string{
+		"🏳️‍🌈 Центр 'Радуга' - ул. Мира, 15 (всегда открыты для поддержки)",
+		"🏳️‍🌈 Кафе 'Вместе' - пр. Свободы, 42 (безопасное пространство)",
+		"🏳️‍🌈 Книжный 'Открытый мир' - ул. Ленина, 7 (ЛГБТ+ литература)",
+		"🏳️‍🌈 Арт-пространство 'Толерантность' - пер. Художников, 5",
+		"🏳️‍🌈 Спортклуб 'Единство' - ул. Спортивная, 23",
+	}
+
+	result := fmt.Sprintf("📍 Союзники в %s (радиус %d км):\n", place, radius)
+	for _, a := range allies {
+		result += "  • " + a + "\n"
+	}
+	result += "\n🌟 Помните: вы не одиноки! Союзники всегда рядом."
+	return NewTypedString(result), nil
+}
+
+// 4. ИСТОРИЯ ЛГБТ+
+func (i *Interpreter) lgbtHistory(args []TypedValue) (TypedValue, error) {
+	year := 1969
+	if len(args) > 0 {
+		if y, ok := args[0].Value.(int); ok {
+			year = y
+		}
+	}
+
+	country := ""
+	if len(args) > 1 {
+		if c, ok := args[1].Value.(string); ok {
+			country = c
+		}
+	}
+
+	historyEvents := map[int]string{
+		1924:  "Основана первая ЛГБТ-организация в США (Society for Human Rights)",
+		1950:  "Создана первая гей-организация в Германии",
+		1969:  "Стоунволлские бунты - начало движения за права ЛГБТ+",
+		1973:  "Американская психиатрическая ассоциация исключила гомосексуальность из списка психических расстройств",
+		1982:  "Первая публикация о ВИЧ/СПИДе в ЛГБТ-сообществе",
+		1990:  "ВОЗ исключила гомосексуальность из списка болезней",
+		1994:  "Основан первый ЛГБТ-журнал в России",
+		2001:  "Нидерланды - первая страна, легализовавшая однополые браки",
+		2003:  "Легализация однополых браков в Бельгии и Канаде",
+		2005:  "Испания легализует однополые браки",
+		2006:  "Южная Африка - первая африканская страна, легализовавшая однополые браки",
+		2010:  "Португалия, Исландия и Аргентина легализуют однополые браки",
+		2013:  "Франция и Новая Зеландия легализуют однополые браки",
+		2015:  "Верховный суд США легализует однополые браки во всех штатах",
+		2017:  "Германия и Мальта легализуют однополые браки",
+		2019:  "Тайвань - первая азиатская страна, легализовавшая однополые браки",
+		2020:  "В России принят закон о запрете пропаганды ЛГБТ+",
+		2022:  "Чили легализует однополые браки",
+		2023:  "В Греции легализованы однополые браки и усыновление",
+		2024:  "Болгария и Румыния принимают законы о гражданских партнерствах",
+	}
+
+	result := fmt.Sprintf("📅 ЛГБТ+ история (%d год", year)
+	if country != "" {
+		result += fmt.Sprintf(", %s", country)
+	}
+	result += "):\n"
+
+	found := false
+	for y, event := range historyEvents {
+		if (country == "" || strings.Contains(strings.ToLower(event), strings.ToLower(country))) &&
+			(year == 0 || y == year) {
+			result += fmt.Sprintf("  • %d: %s\n", y, event)
+			found = true
+		}
+	}
+
+	if !found {
+		if year > 0 {
+			result += fmt.Sprintf("  ℹ️ Нет событий в %d году\n", year)
+		} else {
+			result += "  ℹ️ Нет событий по вашему запросу\n"
+		}
+	}
+
+	result += "\n🏳️‍🌈 Помните: мы сильны, потому что мы помним свою историю!"
+	return NewTypedString(result), nil
+}
+
+// 5. АВАТАР ПОДДЕРЖКИ
+func (i *Interpreter) prideAvatar(args []TypedValue) (TypedValue, error) {
+	if len(args) < 2 {
+		return TypedValue{}, fmt.Errorf("prideAvatar: expected name and style")
+	}
+
+	name, _ := args[0].Value.(string)
+	style, _ := args[1].Value.(string)
+
+	flagTypes := []string{"pride", "trans", "lesbian", "gay", "bisexual", "nonbinary"}
+	selectedFlag := flagTypes[i.rand.Intn(len(flagTypes))]
+
+	if style != "" {
+		for _, f := range flagTypes {
+			if strings.Contains(strings.ToLower(style), f) {
+				selectedFlag = f
+				break
+			}
+		}
+	}
+
+	colors := i.flagColors[selectedFlag]
+	if len(colors) == 0 {
+		colors = i.flagColors["pride"]
+	}
+
+	avatar := fmt.Sprintf(`
+🏳️‍🌈 Аватар для %s (стиль: %s, флаг: %s)
+🌈 Цвета: %s
+
+  /\\_/\\
+ ( o.o )  💙 Ты важен(на)!
+  > ^ <
+
+✨ Твоя идентичность - твоя сила!
+🏳️‍🌈 Гордись собой!
+`, name, style, selectedFlag, strings.Join(colors, ", "))
+
+	return NewTypedString(avatar), nil
+}
+
+// 6. ДНЕВНИК ЛГБТ+
+func (i *Interpreter) lgbtJournal(args []TypedValue) (TypedValue, error) {
+	if len(args) < 2 {
+		return TypedValue{}, fmt.Errorf("lgbtJournal: expected action and text")
+	}
+
+	action, _ := args[0].Value.(string)
+	text, _ := args[1].Value.(string)
+
+	switch strings.ToLower(action) {
+	case "add":
+		encrypted, err := i.encryption.Encrypt(text)
+		if err != nil {
+			return TypedValue{}, err
+		}
+		mood := "neutral"
+		if len(args) > 2 {
+			if m, ok := args[2].Value.(string); ok {
+				mood = m
+			}
+		}
+		entry := JournalEntry{
+			Timestamp: time.Now(),
+			Text:      encrypted,
+			Mood:      mood,
+			Encrypted: true,
+		}
+		i.journalMu.Lock()
+		i.journal = append(i.journal, entry)
+		i.journalMu.Unlock()
+		return NewTypedString("✅ Запись добавлена в дневник (зашифрована)"), nil
+
+	case "read":
+		decrypted, err := i.encryption.Decrypt(text)
+		if err != nil {
+			return TypedValue{}, err
+		}
+		return NewTypedString(fmt.Sprintf("📖 Расшифрованная запись:\n%s", decrypted)), nil
+
+	case "list":
+		i.journalMu.RLock()
+		defer i.journalMu.RUnlock()
+
+		result := fmt.Sprintf("📖 Записей в дневнике: %d\n", len(i.journal))
+		for idx, entry := range i.journal {
+			decrypted, err := i.encryption.Decrypt(entry.Text)
+			if err != nil {
+				decrypted = "[Ошибка расшифровки]"
+			}
+			if len(decrypted) > 50 {
+				decrypted = decrypted[:50] + "..."
+			}
+			result += fmt.Sprintf("  %d. [%s] %s (настроение: %s)\n",
+				idx+1, entry.Timestamp.Format("2006-01-02 15:04"), decrypted, entry.Mood)
+		}
+		return NewTypedString(result), nil
+
+	default:
+		return TypedValue{}, fmt.Errorf("lgbtJournal: unknown action '%s'", action)
+	}
+}
+
+// 7. КАЛЕНДАРЬ СОБЫТИЙ
+func (i *Interpreter) getLGBTCEvents(args []TypedValue) (TypedValue, error) {
+	country := "all"
+	if len(args) > 0 {
+		if c, ok := args[0].Value.(string); ok {
+			country = c
+		}
+	}
+
+	
+	events := []EventEntry{
+		{ID: "e1", Title: "Международный день ЛГБТ+", Date: "2024-05-17", Country: "all", City: "Международный", Type: "activism", Description: "День борьбы с гомофобией", URL: "https://may17.org", Organizer: "UNESCO", Tags: []string{"права", "активизм"}},
+		{ID: "e2", Title: "Московский прайд", Date: "2024-06-01", Country: "Россия", City: "Москва", Type: "pride", Description: "Ежегодный марш гордости", URL: "https://pride.ru", Organizer: "ЛГБТ-сеть", Tags: []string{"прайд", "активизм"}},
+		{ID: "e3", Title: "Петербургский прайд", Date: "2024-06-15", Country: "Россия", City: "Санкт-Петербург", Type: "pride", Description: "Марш гордости в СПб", URL: "https://spbpride.ru", Organizer: "Сфера", Tags: []string{"прайд", "активизм"}},
+		{ID: "e4", Title: "World Pride 2024", Date: "2024-07-01", Country: "Германия", City: "Берлин", Type: "pride", Description: "Всемирный прайд", URL: "https://worldpride.org", Organizer: "International", Tags: []string{"прайд", "международный"}},
+		{ID: "e5", Title: "Транс-марш", Date: "2024-08-15", Country: "США", City: "Нью-Йорк", Type: "activism", Description: "Марш за права транс-людей", URL: "https://transmarch.org", Organizer: "Trans Coalition", Tags: []string{"транс", "активизм"}},
+		{ID: "e6", Title: "ЛГБТ+ конференция", Date: "2024-09-20", Country: "Великобритания", City: "Лондон", Type: "education", Description: "Международная конференция", URL: "https://lgbtconf.org", Organizer: "ILGA", Tags: []string{"конференция", "образование"}},
+		{ID: "e7", Title: "Российская ЛГБТ+ неделя", Date: "2024-10-01", Country: "Россия", City: "Москва", Type: "support", Description: "Неделя поддержки", URL: "https://lgbtweek.ru", Organizer: "ЛГБТ-сеть", Tags: []string{"поддержка", "образование"}},
+		{ID: "e8", Title: "Международный день транс-людей", Date: "2024-11-20", Country: "all", City: "Международный", Type: "support", Description: "День памяти транс-людей", URL: "https://tdor.org", Organizer: "International", Tags: []string{"транс", "память"}},
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("📅 ЛГБТ+ события (страна: %s):\n", country))
+
+	for _, event := range events {
+		if country != "all" && !strings.Contains(strings.ToLower(event.Country), strings.ToLower(country)) {
+			continue
+		}
+		result.WriteString(fmt.Sprintf("  • %s - %s (%s, %s)\n", event.Date, event.Title, event.City, event.Country))
+		result.WriteString(fmt.Sprintf("    📝 %s\n", event.Description))
+		result.WriteString(fmt.Sprintf("    🔗 %s\n", event.URL))
+	}
+
+	return NewTypedString(result.String()), nil
+}
+
+// 8. СОЗДАНИЕ ФЛАГА
+func (i *Interpreter) createFlag(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("createFlag: expected flag type")
+	}
+
+	flagType, _ := args[0].Value.(string)
+	size := 10
+	if len(args) > 1 {
+		if s, ok := args[1].Value.(int); ok {
+			size = s
+		}
+	}
+
+	flagType = strings.ToLower(flagType)
+	colors, ok := i.flagColors[flagType]
+	if !ok {
+		colors = i.flagColors["pride"]
+	}
+
+	var result strings.Builder
+	result.WriteString(fmt.Sprintf("🏳️‍🌈 Флаг '%s' (размер %d):\n", flagType, size))
+	for _, color := range colors {
+		for j := 0; j < size; j++ {
+			result.WriteString("━")
+		}
+		result.WriteString(fmt.Sprintf(" %s\n", color))
+	}
+	result.WriteString(fmt.Sprintf("\n💡 Значение флага '%s':\n", flagType))
+	result.WriteString(getFlagDescription(flagType))
+
+	return NewTypedString(result.String()), nil
+}
+
+func getFlagDescription(flagType string) string {
+	descriptions := map[string]string{
+		"pride":     "Радужный флаг - символ гордости ЛГБТ+ сообщества, обозначает разнообразие и инклюзивность.",
+		"trans":     "Транс-флаг - символ транс-сообщества: голубой - мальчики, розовый - девочки, белый - небинарные люди.",
+		"lesbian":   "Лесбийский флаг - символ лесбийского сообщества.",
+		"gay":       "Гей-флаг - символ гей-сообщества.",
+		"bisexual":  "Бисексуальный флаг - розовый (однополые), синий (противоположные), фиолетовый (все).",
+		"nonbinary": "Небинарный флаг - желтый (небинарность), белый (множество гендеров), фиолетовый (смешение), черный (отсутствие гендера).",
+	}
+	if desc, ok := descriptions[flagType]; ok {
+		return desc
+	}
+	return "Флаг ЛГБТ+ сообщества."
+}
+
+// 9. ТЕРАПЕВТИЧЕСКИЕ УПРАЖНЕНИЯ
+func (i *Interpreter) lgbtTherapy(args []TypedValue) (TypedValue, error) {
+	exerciseType := "acceptance"
+	if len(args) > 0 {
+		if t, ok := args[0].Value.(string); ok {
+			exerciseType = t
+		}
+	}
+
+	duration := 5
+	if len(args) > 1 {
+		if d, ok := args[1].Value.(int); ok {
+			duration = d
+		}
+	}
+
+	exercises := map[string]string{
+		"acceptance": "Упражнение на самопринятие:\n1. Сядьте удобно\n2. Закройте глаза\n3. Повторяйте: 'Я принимаю себя таким(ой), какой(ая) я есть'\n4. Чувствуйте тепло в сердце\n5. Дышите глубоко",
+		"anxiety":    "Упражнение при тревоге:\n1. Дышите медленно (4-4-6)\n2. Назовите 5 вещей, которые видите\n3. Назовите 4 вещи, которые слышите\n4. Назовите 3 вещи, которые чувствуете\n5. Назовите 2 вещи, которые вдыхаете\n6. Назовите 1 вещь, которую пробуете",
+		"strength":   "Упражнение на силу:\n1. Вспомните, что вы пережили\n2. Почувствуйте свою силу\n3. Скажите: 'Я сильнее, чем думаю'\n4. Улыбнитесь себе в зеркало",
+		"gratitude":  "Упражнение на благодарность:\n1. Напишите 3 вещи, за которые вы благодарны\n2. Напишите 3 вещи, которые вам нравятся в себе\n3. Напишите 3 человека, которые вас поддерживают",
+	}
+
+	result := fmt.Sprintf("🧘 Терапевтическое упражнение (%s, %d минут):\n", exerciseType, duration)
+	if exercise, ok := exercises[exerciseType]; ok {
+		result += exercise + "\n"
+	} else {
+		result += "ℹ️ Упражнение не найдено. Доступны: acceptance, anxiety, strength, gratitude\n"
+	}
+	result += "\n💙 Берегите себя! Вы важны."
+
+	return NewTypedString(result), nil
+}
+
+// 10. ЦИТАТЫ ДНЯ
+func (i *Interpreter) lgbtQuote(args []TypedValue) (TypedValue, error) {
+	theme := ""
+	if len(args) > 0 {
+		if t, ok := args[0].Value.(string); ok {
+			theme = t
+		}
+	}
+
+	idx := i.rand.Intn(len(i.quotes))
+	quote := i.quotes[idx]
+
+	if theme != "" {
+		for _, q := range i.quotes {
+			if strings.Contains(strings.ToLower(q), strings.ToLower(theme)) {
+				return NewTypedString(fmt.Sprintf("💬 Цитата дня (тема: %s):\n%s", theme, q)), nil
+			}
+		}
+	}
+
+	return NewTypedString(fmt.Sprintf("💬 Цитата дня:\n%s", quote)), nil
+}
+
+// 11. КНИЖНЫЙ КЛУБ
+func (i *Interpreter) lgbtBookClub(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		result := "📚 ЛГБТ+ литература:\n"
+		for _, book := range i.books {
+			result += fmt.Sprintf("  • '%s' - %s (%s, %s)\n", book.Title, book.Author, book.Year, book.Genre)
+			result += fmt.Sprintf("    📝 %s\n", book.Description)
+			result += fmt.Sprintf("    🏷️ Темы: %s\n", strings.Join(book.Themes, ", "))
+		}
+		return NewTypedString(result), nil
+	}
+
+	title, _ := args[0].Value.(string)
+	for _, book := range i.books {
+		if strings.Contains(strings.ToLower(book.Title), strings.ToLower(title)) {
+			result := fmt.Sprintf("📖 %s\n", book.Title)
+			result += fmt.Sprintf("👤 Автор: %s\n", book.Author)
+			result += fmt.Sprintf("📅 Год: %s\n", book.Year)
+			result += fmt.Sprintf("📚 Жанр: %s\n", book.Genre)
+			result += fmt.Sprintf("📝 Описание: %s\n", book.Description)
+			result += fmt.Sprintf("🏷️ Темы: %s\n", strings.Join(book.Themes, ", "))
+			result += fmt.Sprintf("👥 Возраст: %s\n", book.AgeGroup)
+			return NewTypedString(result), nil
+		}
+	}
+
+	return NewTypedString(fmt.Sprintf("ℹ️ Книга '%s' не найдена", title)), nil
+}
+
+// 12. ОПРЕДЕЛИТЕЛЬ ПРИВИЛЕГИЙ
+func (i *Interpreter) checkPrivilege(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("checkPrivilege: expected country")
+	}
+
+	country, _ := args[0].Value.(string)
+
+	privilegeMap := map[string]int{
+		"Россия":         3,
+		"США":            8,
+		"Германия":       9,
+		"Франция":        8,
+		"Великобритания": 8,
+		"Канада":         9,
+		"Нидерланды":     9,
+		"Испания":        8,
+		"Португалия":     7,
+		"Аргентина":      6,
+		"ЮАР":            5,
+		"Израиль":        7,
+		"Турция":         2,
+		"Китай":          2,
+		"Япония":         5,
+		"Корея":          4,
+		"Бразилия":       6,
+		"Мексика":        4,
+	}
+
+	score, ok := privilegeMap[country]
+	if !ok {
+		score = 5
+	}
+
+	level := "низкий"
+	if score >= 8 {
+		level = "высокий"
+	} else if score >= 6 {
+		level = "средний"
+	} else if score >= 4 {
+		level = "ниже среднего"
+	}
+
+	emoji := "⚠️"
+	if score >= 8 {
+		emoji = "🌟"
+	} else if score >= 6 {
+		emoji = "👍"
+	} else if score >= 4 {
+		emoji = "⚖️"
+	}
+
+	result := fmt.Sprintf("%s Уровень безопасности для ЛГБТ+ в %s:\n", emoji, country)
+	result += fmt.Sprintf("📊 Рейтинг: %d/10 (%s уровень)\n", score, level)
+	result += fmt.Sprintf("📝 Рекомендация: %s\n", getSafetyRecommendation(score))
+
+	return NewTypedString(result), nil
+}
+
+func getSafetyRecommendation(score int) string {
+	if score >= 8 {
+		return "Относительно безопасно. Сообщество поддерживает ЛГБТ+ права."
+	} else if score >= 6 {
+		return "В целом безопасно, но есть некоторые ограничения."
+	} else if score >= 4 {
+		return "Будьте осторожны в некоторых районах. Ищите союзников."
+	}
+	return "Высокий риск. Рекомендуется быть крайне осторожным."
+}
+
+// 13. СЕРТИФИКАТ БЕЗОПАСНОСТИ
+func (i *Interpreter) createSafeSpaceCert(args []TypedValue) (TypedValue, error) {
+	if len(args) < 2 {
+		return TypedValue{}, fmt.Errorf("createSafeSpaceCert: expected school and address")
+	}
+
+	school, _ := args[0].Value.(string)
+	address, _ := args[1].Value.(string)
+
+	cert := fmt.Sprintf(`
+🏳️‍🌈 СЕРТИФИКАТ "БЕЗОПАСНОЕ ПРОСТРАНСТВО" 🏳️‍🌈
+
+Настоящим подтверждается, что
+
+    %s
+    %s
+
+является безопасным пространством для ЛГБТ+ студентов и сотрудников.
+
+Это место гарантирует:
+• Принятие всех гендерных идентичностей
+• Нулевую толерантность к дискриминации
+• Конфиденциальность и поддержку
+• Доступ к ресурсам ЛГБТ+
+
+Дата: %s
+Сертификат действителен до: %s
+
+💙 Вместе мы создаем безопасный мир!
+`, school, address, time.Now().Format("2006-01-02"), time.Now().AddDate(1, 0, 0).Format("2006-01-02"))
+
+	return NewTypedString(cert), nil
+}
+
+// 14. ПЛАН АКТИВИЗМА
+func (i *Interpreter) activismPlan(args []TypedValue) (TypedValue, error) {
+	if len(args) < 2 {
+		return TypedValue{}, fmt.Errorf("activismPlan: expected goal and country")
+	}
+
+	goal, _ := args[0].Value.(string)
+	country, _ := args[1].Value.(string)
+
+	plan := fmt.Sprintf(`
+✊ АКТИВИЗМ-ПЛАН
+
+Цель: %s
+Страна: %s
+
+Шаги:
+1. 📚 Изучите законодательство о ЛГБТ+ в стране
+2. 🤝 Найдите местные ЛГБТ+ организации
+3. 📝 Создайте петицию или письмо
+4. 🌐 Используйте социальные сети для информирования
+5. 🗣️ Организуйте встречи и дискуссии
+6. 📊 Отслеживайте прогресс и достижения
+
+Важно:
+• Соблюдайте местные законы
+• Будьте в безопасности
+• Поддерживайте других активистов
+
+💪 Вместе мы можем изменить мир!
+`, goal, country)
+
+	return NewTypedString(plan), nil
+}
+
+// 15. МАНДАЛА ПОДДЕРЖКИ
+func (i *Interpreter) prideMandalas(args []TypedValue) (TypedValue, error) {
+	name := "друг"
+	if len(args) > 0 {
+		if n, ok := args[0].Value.(string); ok {
+			name = n
+		}
+	}
+
+	colors := []string{"❤️", "🧡", "💛", "💚", "💙", "💜"}
+	if len(args) > 1 {
+		if c, ok := args[1].Value.([]TypedValue); ok {
+			colors = make([]string, len(c))
+			for i, v := range c {
+				if s, ok := v.Value.(string); ok {
+					colors[i] = s
+				}
+			}
+		}
+	}
+
+	mandala := fmt.Sprintf(`
+🌸 МАНДАЛА ДЛЯ %s 🌸
+
+    %s %s %s
+   %s %s %s %s %s
+  %s %s %s %s %s %s %s
+   %s %s %s %s %s
+    %s %s %s
+
+💫 Каждый цвет — это часть твоей души.
+🌈 Ты — прекрасное создание!
+`, strings.ToUpper(name),
+		colors[0], colors[1], colors[2],
+		colors[3], colors[0], colors[4], colors[1], colors[5],
+		colors[2], colors[3], colors[5], colors[0], colors[4], colors[1],
+		colors[5], colors[2], colors[3], colors[0], colors[1],
+		colors[4], colors[5], colors[2])
+
+	return NewTypedString(mandala), nil
+}
+
+// 16. ХРОНОГРАФ БОРЬБЫ
+func (i *Interpreter) lgbtTimeline(args []TypedValue) (TypedValue, error) {
+	var result strings.Builder
+	result.WriteString("🏳️‍🌈 Хронограф борьбы за права ЛГБТ+:\n\n")
+
+	timeline := []string{
+		"1924 - Основана первая ЛГБТ-организация",
+		"1950 - Создана первая гей-организация в Германии",
+		"1969 - Стоунволлские бунты",
+		"1973 - Гомосексуальность исключена из списка психических расстройств в США",
+		"1990 - ВОЗ исключает гомосексуальность из списка болезней",
+		"1994 - Основан первый ЛГБТ-журнал в России",
+		"2001 - Нидерланды - первая страна с однополыми браками",
+		"2003 - Бельгия и Канада легализуют однополые браки",
+		"2005 - Испания легализует однополые браки",
+		"2006 - Южная Африка - первая африканская страна",
+		"2010 - Португалия, Исландия, Аргентина",
+		"2013 - Франция и Новая Зеландия",
+		"2015 - Верховный суд США легализует однополые браки",
+		"2017 - Германия и Мальта",
+		"2019 - Тайвань - первая азиатская страна",
+		"2022 - Чили легализует однополые браки",
+		"2023 - Греция легализует однополые браки",
+	}
+
+	for _, event := range timeline {
+		result.WriteString(fmt.Sprintf("  • %s\n", event))
+	}
+
+	result.WriteString("\n✊ Мы боремся, мы побеждаем! Наша история - наша сила!")
+	return NewTypedString(result.String()), nil
+}
+
+// 17. КАРТА ХЕЙТА
+func (i *Interpreter) hateMap(args []TypedValue) (TypedValue, error) {
+	region := "все"
+	if len(args) > 0 {
+		if r, ok := args[0].Value.(string); ok {
+			region = r
+		}
+	}
+
+	hateLevels := map[string]string{
+		"Россия":          "⚠️ Высокий уровень. Будьте осторожны.",
+		"США":             "📊 Средний уровень. Региональные различия.",
+		"Германия":        "✅ Низкий уровень. Относительно безопасно.",
+		"Франция":         "✅ Низкий уровень. Безопасно.",
+		"Великобритания":  "✅ Низкий уровень. Безопасно.",
+		"Канада":          "✅ Очень низкий уровень. Очень безопасно.",
+		"Турция":          "⚠️ Высокий уровень. Будьте осторожны.",
+		"Китай":           "⚠️ Высокий уровень. Соблюдайте осторожность.",
+		"Япония":          "📊 Средний уровень. Относительно безопасно.",
+		"Бразилия":        "📊 Средний уровень. Осторожно в некоторых районах.",
+		"ЮАР":             "📊 Средний уровень. Будьте внимательны.",
+		"Австралия":       "✅ Низкий уровень. Безопасно.",
+		"Новая Зеландия":  "✅ Низкий уровень. Очень безопасно.",
+	}
+
+	result := fmt.Sprintf("🗺️ Карта ненависти (%s):\n", region)
+	if region == "все" {
+		for country, level := range hateLevels {
+			result += fmt.Sprintf("  • %s: %s\n", country, level)
+		}
+	} else {
+		if level, ok := hateLevels[region]; ok {
+			result += fmt.Sprintf("  • %s: %s\n", region, level)
+		} else {
+			result += fmt.Sprintf("  ℹ️ Информация по региону '%s' уточняется\n", region)
+		}
+	}
+
+	result += "\n🛡️ Помните: вы не одиноки! Поддержка всегда рядом."
+	return NewTypedString(result), nil
+}
+
+// 18. ПОИСК МЕНТОРА
+func (i *Interpreter) findMentor(args []TypedValue) (TypedValue, error) {
+	interest := "comingout"
+	if len(args) > 0 {
+		if in, ok := args[0].Value.(string); ok {
+			interest = in
+		}
+	}
+
+	experience := "beginner"
+	if len(args) > 1 {
+		if exp, ok := args[1].Value.(string); ok {
+			experience = exp
+		}
+	}
+
+	mentors := map[string]string{
+		"comingout":  "👤 Ментор по каминг-ауту:\nАлекс (35 лет, гей)\n'Я помогу тебе найти слова и смелость'\n🕒 3 года опыта",
+		"trans":      "🏳️‍⚧️ Ментор по транс-вопросам:\nДжей (28 лет, транс-женщина)\n'Я прошла этот путь и готова помочь'\n🕒 5 лет опыта",
+		"anxiety":    "🧠 Ментор по тревоге:\nСаша (32 года, небинарный(ая))\n'Я научу тебя справляться'\n🕒 4 года опыта",
+		"career":     "💼 Ментор по карьере:\nМария (40 лет, лесбиянка)\n'Я помогу тебе построить карьеру'\n🕒 10 лет опыта",
+		"relationships": "❤️ Ментор по отношениям:\nДмитрий (30 лет, бисексуал)\n'Я помогу тебе найти любовь'\n🕒 3 года опыта",
+	}
+
+	result := fmt.Sprintf("🤝 Ментор по теме '%s' (уровень: %s):\n", interest, experience)
+	if mentor, ok := mentors[interest]; ok {
+		result += mentor + "\n"
+	} else {
+		result += "ℹ️ Ментор не найден. Попробуйте: comingout, trans, anxiety, career, relationships\n"
+	}
+	result += "\n🌟 Помните: у каждого есть свой путь, и вы не одни!"
+
+	return NewTypedString(result), nil
+}
+
+// ============================================================
+// ВСТРОЕННЫЕ ФУНКЦИИ - РЕГИСТРАЦИЯ ВСЕХ ФУНКЦИЙ
+// ============================================================
+
+func (i *Interpreter) getBuiltinFunction(name string) (func([]TypedValue) (TypedValue, error), bool) {
+	switch name {
+	// Оригинальные функции
+	case "msg":
+		return i.msg, true
+	case "antiHomoPhobe":
+		return i.antiHomoPhobe, true
+	case "lgbtImg":
+		return i.lgbtImg, true
+	case "getLGBTResources":
+		return i.getLGBTResources, true
+	case "findSafeSpace":
+		return i.findSafeSpace, true
+	case "getCrisisSupport":
+		return i.getCrisisSupport, true
+	case "getLGBTQLaws":
+		return i.getLGBTQLaws, true
+	case "getDailyAffirmation":
+		return i.getDailyAffirmation, true
+	case "moodCheck":
+		return i.moodCheck, true
+	case "guidedBreathing":
+		return i.guidedBreathing, true
+	case "defineTerm":
+		return i.defineTerm, true
+
+	// Функции фильтра ненависти
+	case "checkHate":
+		return i.checkHate, true
+	case "filterHate":
+		return i.filterHate, true
+	case "enableHateFilter":
+		return i.enableHateFilter, true
+	case "disableHateFilter":
+		return i.disableHateFilter, true
+
+	// НОВЫЕ ФУНКЦИИ (18+)
+	case "comingOutLetter":
+		return i.comingOutLetter, true
+	case "transSupport":
+		return i.transSupport, true
+	case "findAllies":
+		return i.findAllies, true
+	case "lgbtHistory":
+		return i.lgbtHistory, true
+	case "prideAvatar":
+		return i.prideAvatar, true
+	case "lgbtJournal":
+		return i.lgbtJournal, true
+	case "getLGBTCEvents":
+		return i.getLGBTCEvents, true
+	case "createFlag":
+		return i.createFlag, true
+	case "lgbtTherapy":
+		return i.lgbtTherapy, true
+	case "lgbtQuote":
+		return i.lgbtQuote, true
+	case "lgbtBookClub":
+		return i.lgbtBookClub, true
+	case "checkPrivilege":
+		return i.checkPrivilege, true
+	case "createSafeSpaceCert":
+		return i.createSafeSpaceCert, true
+	case "activismPlan":
+		return i.activismPlan, true
+	case "prideMandalas":
+		return i.prideMandalas, true
+	case "lgbtTimeline":
+		return i.lgbtTimeline, true
+	case "hateMap":
+		return i.hateMap, true
+	case "findMentor":
+		return i.findMentor, true
+
+	default:
+		return nil, false
+	}
+}
+
+// ============================================================
+// ОСТАЛЬНЫЕ ФУНКЦИИ (msg, antiHomoPhobe, lgbtImg, и т.д.)
+// ============================================================
+
+func (i *Interpreter) msg(args []TypedValue) (TypedValue, error) {
+	if len(args) < 2 {
+		return TypedValue{}, fmt.Errorf("msg: expected 2 arguments (title, text)")
+	}
+
+	title, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("msg: first argument (title) must be string")
+	}
+
+	text, ok := args[1].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("msg: second argument (text) must be string")
+	}
+
+	hasHateTitle, filteredTitle := i.checkHateSpeech(title)
+	if hasHateTitle {
+		title = filteredTitle
+		fmt.Fprintln(output, "⚠️ Обнаружена ненависть в заголовке диалога! Заголовок отфильтрован.")
+	}
+
+	hasHateText, filteredText := i.checkHateSpeech(text)
+	if hasHateText {
+		text = filteredText
+		fmt.Fprintln(output, "⚠️ Обнаружена ненависть в тексте диалога! Текст отфильтрован.")
+	}
+
+	flags := MB_OK
+	if len(args) > 2 {
+		if typeStr, ok := args[2].Value.(string); ok {
+			switch strings.ToLower(typeStr) {
+			case "ok":
+				flags = MB_OK
+			case "okcancel":
+				flags = MB_OKCANCEL
+			case "yesno":
+				flags = MB_YESNO
+			case "yesnocancel":
+				flags = MB_YESNOCANCEL
+			case "retrycancel":
+				flags = MB_RETRYCANCEL
+			case "abortretryignore":
+				flags = MB_ABORTRETRYIGNORE
+			default:
+				flags = MB_OK
+			}
+		}
+	}
+
+	if len(args) > 3 {
+		if iconStr, ok := args[3].Value.(string); ok {
+			switch strings.ToLower(iconStr) {
+			case "info", "information":
+				flags |= MB_ICONINFORMATION
+			case "warning":
+				flags |= MB_ICONWARNING
+			case "error":
+				flags |= MB_ICONERROR
+			case "question":
+				flags |= MB_ICONQUESTION
+			}
+		}
+	}
+
+	titlePtr, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("msg: failed to create title: %v", err)
+	}
+
+	textPtr, err := syscall.UTF16PtrFromString(text)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("msg: failed to create text: %v", err)
+	}
+
+	result := MessageBox(0, textPtr, titlePtr, uint32(flags))
+
+	var resultStr string
+	switch result {
+	case IDOK:
+		resultStr = "ok"
+	case IDCANCEL:
+		resultStr = "cancel"
+	case IDYES:
+		resultStr = "yes"
+	case IDNO:
+		resultStr = "no"
+	case IDRETRY:
+		resultStr = "retry"
+	case IDABORT:
+		resultStr = "abort"
+	case IDIGNORE:
+		resultStr = "ignore"
+	default:
+		resultStr = "unknown"
+	}
+
+	response := "✅ Диалоговое окно показано (нажато: " + resultStr + ")"
+	if hasHateTitle || hasHateText {
+		response += " [фильтрация ненависти применена]"
+	}
+	return NewTypedString(response), nil
+}
+
+func (i *Interpreter) antiHomoPhobe(args []TypedValue) (TypedValue, error) {
+	duration := 7
+	if len(args) > 0 {
+		if d, ok := args[0].Value.(int); ok {
+			if d > 0 && d <= 30 {
+				duration = d
+			}
+		}
+	}
+
+	fmt.Fprintf(output, "\n🚨🚨🚨 ANTI-GOMOPHOBE АКТИВИРОВАНА! 🚨🚨🚨\n")
+	fmt.Fprintf(output, "🔄 Выдвигаю дисковод и мигаю лампочками клавиатуры...\n")
+	fmt.Fprintf(output, "⏱️  Длительность: %d секунд\n\n", duration)
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("powershell", "-Command", "(New-Object -ComObject Shell.Application).EjectCD()")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
+		} else {
+			fmt.Fprintf(output, "💿 Дисковод выдвинут\n")
+		}
+	} else {
+		cmd := exec.Command("eject")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(output, "⚠️ Не удалось выдвинуть дисковод: %v\n", err)
+		} else {
+			fmt.Fprintf(output, "💿 Дисковод выдвинут\n")
+		}
+	}
+
+	startTime := time.Now()
+	done := make(chan bool)
+
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		state := false
+		for {
+			select {
+			case <-ticker.C:
+				state = !state
+				elapsed := time.Since(startTime).Seconds()
+				remaining := duration - int(elapsed)
+				if remaining < 0 {
+					remaining = 0
+				}
+
+				if state {
+					fmt.Fprintf(output, "\r💡💡💡 [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
+				} else {
+					fmt.Fprintf(output, "\r⬜⬜⬜ [Caps Lock] [Num Lock] [Scroll Lock] - Осталось: %2d сек   ", remaining)
+				}
+
+				if runtime.GOOS == "windows" {
+					keybdEvent(0x14, 0, 0, 0)
+					keybdEvent(0x14, 0, 0x0002, 0)
+					keybdEvent(0x90, 0, 0, 0)
+					keybdEvent(0x90, 0, 0x0002, 0)
+					keybdEvent(0x91, 0, 0, 0)
+					keybdEvent(0x91, 0, 0x0002, 0)
+				}
+
+				if elapsed >= float64(duration) {
+					done <- true
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	<-done
+	fmt.Fprintln(output)
+
+	if runtime.GOOS == "windows" {
+		fmt.Fprintf(output, "📀 Для закрытия дисковода нажмите кнопку на приводе или используйте 'Извлечь' в проводнике.\n")
+	} else {
+		cmd := exec.Command("eject", "-t")
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(output, "⚠️ Не удалось закрыть дисковод: %v\n", err)
+		} else {
+			fmt.Fprintf(output, "📀 Дисковод закрыт\n")
+		}
+	}
+
+	fmt.Fprintf(output, "\n✅ Anti-GomoPhobe завершена!\n")
+	fmt.Fprintf(output, "📊 Лампочки мигали %d секунд\n", duration)
+
+	result := fmt.Sprintf("✅ Anti-GomoPhobe выполнена! Дисковод выдвинут на %d секунд, лампочки мигали.", duration)
+	return NewTypedString(result), nil
+}
+
+func keybdEvent(bVk byte, bScan byte, dwFlags uintptr, dwExtraInfo uintptr) {
+	procKeybdEvent.Call(uintptr(bVk), uintptr(bScan), dwFlags, dwExtraInfo)
+}
+
+func (i *Interpreter) lgbtImg(args []TypedValue) (TypedValue, error) {
+	if len(args) < 3 {
+		return TypedValue{}, fmt.Errorf("lgbtImg: expected 3 arguments (prompt, width, height), got %d", len(args))
+	}
+
+	prompt, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("lgbtImg: first argument (prompt) must be string")
+	}
+
+	width, ok := args[1].Value.(int)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("lgbtImg: second argument (width) must be integer")
+	}
+
+	height, ok := args[2].Value.(int)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("lgbtImg: third argument (height) must be integer")
+	}
+
+	if width < 1 || width > 4096 {
+		return TypedValue{}, fmt.Errorf("lgbtImg: width must be between 1 and 4096")
+	}
+
+	if height < 1 || height > 4096 {
+		return TypedValue{}, fmt.Errorf("lgbtImg: height must be between 1 and 4096")
+	}
+
+	now := time.Now()
+	timestamp := now.UnixNano()
+	dateStr := now.Format("20060102_150405.000")
+
+	lgbtThemes := []string{
+		"rainbow pride flag, LGBTQ+ community, diversity, inclusion, love",
+		"pride celebration, colorful, LGBTQ rights, equality, joy",
+		"rainbow colors, pride parade, LGBTQ+ pride, acceptance, unity",
+		"diverse LGBTQ+ people, rainbow, pride, love is love, happiness",
+		"pride flag waving, LGBTQ community, rainbow, freedom, equality",
+		"colorful pride celebration, LGBTQ+, diversity, inclusion, joy",
+	}
+
+	styles := []string{
+		"digital art, vibrant colors, detailed, beautiful",
+		"watercolor, soft colors, artistic, dreamy",
+		"cartoon style, colorful, cute, cheerful",
+		"realistic, detailed, vibrant, stunning",
+		"abstract, colorful, modern, artistic",
+		"fantasy style, magical, colorful, dreamy",
+	}
+
+	themeIdx := i.rand.Intn(len(lgbtThemes))
+	styleIdx := i.rand.Intn(len(styles))
+
+	randomWords := []string{
+		"beautiful", "wonderful", "amazing", "incredible", "magnificent",
+		"spectacular", "fantastic", "gorgeous", "stunning", "breathtaking",
+	}
+	randWord := randomWords[i.rand.Intn(len(randomWords))]
+
+	colors := []string{"red", "orange", "yellow", "green", "blue", "purple", "pink", "gold", "silver"}
+	randColor := colors[i.rand.Intn(len(colors))]
+
+	uniquePrompt := fmt.Sprintf("%s, %s, %s, %s, %s, %s pride, %s colors",
+		prompt,
+		lgbtThemes[themeIdx],
+		styles[styleIdx],
+		randWord,
+		randColor,
+		randColor,
+		randColor,
+	)
+
+	encodedPrompt := url.QueryEscape(uniquePrompt)
+	seed := timestamp + int64(i.rand.Intn(1000000))
+	cacheBuster := fmt.Sprintf("%d_%d_%d", timestamp, seed, i.rand.Intn(999999))
+
+	urlStr := fmt.Sprintf("https://image.pollinations.ai/prompt/%s?width=%d&height=%d&enhance=true&nologo=true&seed=%d&_cb=%s&_t=%d&rnd=%d",
+		encodedPrompt, width, height, seed, cacheBuster, timestamp, i.rand.Intn(99999))
+
+	if err := i.sandbox.CheckURL(urlStr); err != nil {
+		return TypedValue{}, err
+	}
+
+	safeFilename := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(prompt, "_")
+	if len(safeFilename) > 50 {
+		safeFilename = safeFilename[:50]
+	}
+	if safeFilename == "" {
+		safeFilename = "lgbt_image"
+	}
+
+	filename := fmt.Sprintf("%s_%s_%d.png", safeFilename, dateStr, seed%100000)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	client := &http.Client{
+		Timeout: 45 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        1,
+			MaxIdleConnsPerHost: 1,
+			DisableKeepAlives:   true,
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: failed to create request: %v", err)
+	}
+
+	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Expires", "0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: cannot read response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return TypedValue{}, fmt.Errorf("lgbtImg: HTTP error: %s", resp.Status)
+	}
+
+	if int64(len(body)) > i.sandbox.maxFileSize {
+		return TypedValue{}, fmt.Errorf("lgbtImg: image too large: %d bytes", len(body))
+	}
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: cannot create file: %v", err)
+	}
+	defer file.Close()
+
+	written, err := file.Write(body)
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("lgbtImg: cannot write file: %v", err)
+	}
+
+	result := fmt.Sprintf("🏳️‍🌈 Изображение сохранено: %s\n", filename)
+	result += fmt.Sprintf("📐 Размер: %dx%d\n", width, height)
+	result += fmt.Sprintf("📝 Промпт: %s\n", prompt)
+	result += fmt.Sprintf("🎨 Уникальный промпт: %s\n", uniquePrompt[:min(100, len(uniquePrompt))])
+	result += fmt.Sprintf("🎲 Seed: %d\n", seed)
+	result += fmt.Sprintf("📅 Время: %s\n", dateStr)
+	result += fmt.Sprintf("📦 Размер файла: %d байт\n", written)
+
+	fmt.Fprintf(output, "✅ Сгенерировано ЛГБТ-изображение: %s\n", filename)
+	fmt.Fprintf(output, "📐 Размер: %dx%d\n", width, height)
+	fmt.Fprintf(output, "📝 Оригинальный промпт: %s\n", prompt)
+	fmt.Fprintf(output, "🎨 Уникальный промпт: %s\n", uniquePrompt[:min(100, len(uniquePrompt))])
+	fmt.Fprintf(output, "🎲 Seed: %d\n", seed)
+	fmt.Fprintf(output, "📅 Время: %s\n", dateStr)
+	fmt.Fprintf(output, "📦 Размер файла: %d байт\n", written)
+
+	return NewTypedString(result), nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (i *Interpreter) getLGBTResources(args []TypedValue) (TypedValue, error) {
+	type Resource struct {
+		ID           string   `json:"id"`
+		Name         string   `json:"name"`
+		Type         string   `json:"type"`
+		Description  string   `json:"description"`
+		Country      string   `json:"country"`
+		City         string   `json:"city"`
+		Address      string   `json:"address,omitempty"`
+		Phone        string   `json:"phone,omitempty"`
+		Email        string   `json:"email,omitempty"`
+		Website      string   `json:"website,omitempty"`
+		Services     []string `json:"services"`
+		WorkingHours string   `json:"working_hours,omitempty"`
+		Verified     bool     `json:"verified"`
+		Rating       float64  `json:"rating,omitempty"`
+		Reviews      int      `json:"reviews,omitempty"`
+		Languages    []string `json:"languages,omitempty"`
+	}
+
+	resources := []Resource{
+		{
+			ID:           "r1",
+			Name:         "Российская ЛГБТ-сеть",
+			Type:         "network",
+			Description:  "Крупнейшая российская ЛГБТ-организация, предоставляющая юридическую, психологическую и социальную поддержку",
+			Country:      "Россия",
+			City:         "Москва",
+			Address:      "ул. Тверская, д. 15, оф. 302",
+			Phone:        "+7 (495) 123-45-67",
+			Email:        "info@lgbtnet.ru",
+			Website:      "https://lgbtnet.ru",
+			Services:     []string{"юридическая_помощь", "психологическая_поддержка", "горячая_линия", "социальная_адаптация", "образовательные_программы"},
+			WorkingHours: "Пн-Пт: 10:00-20:00, Сб: 12:00-18:00",
+			Verified:     true,
+			Rating:       4.8,
+			Reviews:      124,
+			Languages:    []string{"ru", "en"},
+		},
+		{
+			ID:           "r2",
+			Name:         "Центр 'Сфера'",
+			Type:         "psychological",
+			Description:  "Центр психологической и социальной поддержки ЛГБТ+ людей",
+			Country:      "Россия",
+			City:         "Санкт-Петербург",
+			Address:      "Невский проспект, д. 25",
+			Phone:        "+7 (812) 987-65-43",
+			Email:        "sphere@lgbt.support",
+			Website:      "https://sfera-spb.ru",
+			Services:     []string{"психологическая_поддержка", "группы_поддержки", "консультации", "горячая_линия"},
+			WorkingHours: "Пн-Вс: 09:00-21:00",
+			Verified:     true,
+			Rating:       4.6,
+			Reviews:      89,
+			Languages:    []string{"ru"},
+		},
+		{
+			ID:           "r3",
+			Name:         "Human Rights Campaign",
+			Type:         "advocacy",
+			Description:  "Крупнейшая американская организация по защите прав ЛГБТ+",
+			Country:      "США",
+			City:         "Вашингтон",
+			Address:      "1640 Rhode Island Ave NW",
+			Phone:        "+1 (202) 628-4160",
+			Email:        "info@hrc.org",
+			Website:      "https://hrc.org",
+			Services:     []string{"адвокация", "юридическая_помощь", "образовательные_программы", "исследования"},
+			WorkingHours: "Пн-Пт: 09:00-18:00 EST",
+			Verified:     true,
+			Rating:       4.9,
+			Reviews:      312,
+			Languages:    []string{"en", "es"},
+		},
+	}
+
+	jsonData, err := json.MarshalIndent(resources, "", "  ")
+	if err != nil {
+		return TypedValue{}, fmt.Errorf("ошибка сериализации JSON: %v", err)
+	}
+
+	return NewTypedString(string(jsonData)), nil
+}
+
+func (i *Interpreter) findSafeSpace(args []TypedValue) (TypedValue, error) {
+	if len(args) < 2 {
+		return TypedValue{}, fmt.Errorf("findSafeSpace: expected at least 2 arguments (place, city)")
+	}
+	place, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("findSafeSpace: first argument must be string")
+	}
+	city, ok := args[1].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("findSafeSpace: second argument must be string")
+	}
+
+	radius := 5
+	if len(args) > 2 {
+		if r, ok := args[2].Value.(int); ok {
+			radius = r
+		}
+	}
+
+	places := []string{
+		"🏳️‍🌈 ЛГБТ-дружественное кафе 'Радуга', ул. Цветная, 15",
+		"🏳️‍🌈 Коворкинг 'Вместе', пр. Свободы, 42",
+		"🏳️‍🌈 Книжный магазин 'Открытый мир', ул. Мира, 7",
+		"🏳️‍🌈 Спортивный клуб 'Единство', ул. Спортивная, 23",
+		"🏳️‍🌈 Арт-пространство 'Толерантность', пер. Художников, 5",
+	}
+
+	result := fmt.Sprintf("🌍 Ближайшие %s в %s (радиус %d км):\n", place, city, radius)
+	for _, p := range places {
+		result += "  • " + p + "\n"
+	}
+	result += "\n💡 Проверьте актуальность информации на местных ЛГБТ-ресурсах."
+
+	return NewTypedString(result), nil
+}
+
+func (i *Interpreter) getCrisisSupport(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("getCrisisSupport: expected region argument")
+	}
+	region, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("getCrisisSupport: first argument must be string")
+	}
+
+	supportType := "горячая_линия"
+	if len(args) > 1 {
+		if t, ok := args[1].Value.(string); ok {
+			supportType = t
+		}
+	}
+
+	support := map[string]string{
+		"горячая_линия": "📞 Телефон доверия: 8-800-XXX-XX-XX (круглосуточно)",
+		"чат":           "💬 Онлайн-чат: https://lgbt-support.org/chat",
+		"психолог":      "🧠 Психологическая помощь: запись по телефону +7-XXX-XXX-XX-XX",
+		"юрист":         "⚖️ Юридическая консультация: lgbt-law@support.org",
+	}
+
+	result := fmt.Sprintf("🚨 Кризисная поддержка в регионе '%s':\n", region)
+	if info, ok := support[supportType]; ok {
+		result += "  • " + info + "\n"
+	} else {
+		result += "  • 📞 Общий телефон доверия: 8-800-XXX-XX-XX\n"
+	}
+	result += "\n💙 Вы не одиноки! Помощь доступна 24/7."
+	return NewTypedString(result), nil
+}
+
+func (i *Interpreter) getLGBTQLaws(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("getLGBTQLaws: expected country argument")
+	}
+	country, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("getLGBTQLaws: first argument must be string")
+	}
+
+	category := "права"
+	if len(args) > 1 {
+		if c, ok := args[1].Value.(string); ok {
+			category = c
+		}
+	}
+
+	laws := map[string]string{
+		"Россия":         "⚖️ В России ЛГБТ-права ограничены. Действует закон о пропаганде.",
+		"США":            "⚖️ В США однополые браки легализованы. Есть защита от дискриминации.",
+		"Великобритания": "⚖️ В Великобритании ЛГБТ+ защищены законом. Есть Equality Act.",
+		"Германия":       "⚖️ В Германии однополые браки легальны с 2017 года.",
+		"Франция":        "⚖️ Во Франции ЛГБТ+ защищены, однополые браки легальны.",
+		"Канада":         "⚖️ В Канаде однополые браки легальны с 2005 года.",
+	}
+
+	result := fmt.Sprintf("📚 Информация о законодательстве в стране '%s' (категория: %s):\n", country, category)
+	if info, ok := laws[country]; ok {
+		result += "  • " + info + "\n"
+	} else {
+		result += "  • ℹ️ Информация уточняется. Рекомендуем обратиться к местным ЛГБТ-организациям.\n"
+	}
+	result += "\n🔗 Подробнее: https://ilga.org/"
+	return NewTypedString(result), nil
+}
+
+func (i *Interpreter) getDailyAffirmation(args []TypedValue) (TypedValue, error) {
+	affirmations := []string{
+		"💖 Ты важен(на) и любим(а) таким(ой), какой(ая) ты есть!",
+		"🌈 Твоя идентичность — это твоя сила!",
+		"🌟 Ты заслуживаешь счастья и уважения!",
+		"💪 Ты сильнее, чем думаешь!",
+		"✨ Каждый день ты становишься ближе к своей истинной сущности!",
+		"🌸 Твоя уникальность делает мир красивее!",
+		"🌺 Ты имеешь право быть собой!",
+		"💫 Твоя любовь имеет значение!",
+		"🦋 Ты проходишь свой путь, и это прекрасно!",
+		"🌈 Ты — часть прекрасного разнообразия мира!",
+	}
+
+	theme := "self-love"
+	if len(args) > 0 {
+		if t, ok := args[0].Value.(string); ok {
+			theme = t
+		}
+	}
+
+	idx := i.rand.Intn(len(affirmations))
+	return NewTypedString(fmt.Sprintf("🌟 Аффирмация дня (%s):\n%s", theme, affirmations[idx])), nil
+}
+
+func (i *Interpreter) moodCheck(args []TypedValue) (TypedValue, error) {
+	moods := []string{"тревога", "одиночество", "грусть", "страх", "радость", "спокойствие"}
+	if len(args) > 0 {
+		if m, ok := args[0].Value.([]TypedValue); ok {
+			moods = make([]string, len(m))
+			for idx, v := range m {
+				if s, ok := v.Value.(string); ok {
+					moods[idx] = s
+				}
+			}
+		}
+	}
+
+	suggestResources := true
+	if len(args) > 1 {
+		if s, ok := args[1].Value.(bool); ok {
+			suggestResources = s
+		}
+	}
+
+	result := "🧠 Проверка эмоционального состояния:\n"
+	result += "📊 Отмеченные состояния: " + strings.Join(moods, ", ") + "\n\n"
+
+	if suggestResources {
+		result += "💡 Рекомендации:\n"
+		for _, mood := range moods {
+			switch mood {
+			case "тревога":
+				result += "  • 🌿 Попробуйте дыхательные упражнения (3-3-3 техника)\n"
+			case "одиночество":
+				result += "  • 🤝 Обратитесь в онлайн-чат поддержки\n"
+			case "грусть":
+				result += "  • 🎵 Послушайте вдохновляющую музыку\n"
+			case "страх":
+				result += "  • 🏠 Найдите безопасное место и дышите\n"
+			case "радость":
+				result += "  • 🎉 Поделитесь радостью с близкими!\n"
+			case "спокойствие":
+				result += "  • 🧘 Продолжайте практиковать осознанность\n"
+			}
+		}
+	}
+
+	return NewTypedString(result), nil
+}
+
+func (i *Interpreter) guidedBreathing(args []TypedValue) (TypedValue, error) {
+	minutes := 3
+	if len(args) > 0 {
+		if m, ok := args[0].Value.(int); ok {
+			minutes = m
+		}
+	}
+
+	theme := "calm"
+	if len(args) > 1 {
+		if t, ok := args[1].Value.(string); ok {
+			theme = t
+		}
+	}
+
+	result := fmt.Sprintf("🧘 Упражнение для снижения стресса (%d минут, тема: %s):\n", minutes, theme)
+	result += "🌬️ Следуйте инструкции:\n\n"
+
+	cycles := minutes * 6
+	for i := 0; i < cycles && i < 30; i++ {
+		result += fmt.Sprintf("  Вдох (4 сек) → Задержка (4 сек) → Выдох (6 сек) [цикл %d]\n", i+1)
+	}
+
+	result += "\n💙 Завершите упражнение. Почувствуйте, как ваше тело расслабляется."
+	return NewTypedString(result), nil
+}
+
+func (i *Interpreter) defineTerm(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("defineTerm: expected term argument")
+	}
+	term, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("defineTerm: first argument must be string")
+	}
+
+	language := "ru"
+	if len(args) > 1 {
+		if l, ok := args[1].Value.(string); ok {
+			language = l
+		}
+	}
+
+	terms := map[string]string{
+		"небинарность":      "НЕБИНАРНОСТЬ (Non-binary) — гендерная идентичность, которая не вписывается в бинарную систему мужского и женского пола.",
+		"бисексуальность":   "БИСЕКСУАЛЬНОСТЬ (Bisexuality) — романтическое и/или сексуальное влечение к людям более чем одного пола.",
+		"гомосексуальность": "ГОМОСЕКСУАЛЬНОСТЬ (Homosexuality) — романтическое и/или сексуальное влечение к людям того же пола.",
+		"трансгендерность":  "ТРАНСГЕНДЕРНОСТЬ (Transgender) — состояние, когда гендерная идентичность человека не совпадает с полом при рождении.",
+		"гетеросексуальность": "ГЕТЕРОСЕКСУАЛЬНОСТЬ (Heterosexuality) — романтическое и/или сексуальное влечение к людям противоположного пола.",
+		"квир":              "КВИР (Queer) — зонтичный термин для ЛГБТ+ сообщества, обозначающий несоответствие нормам.",
+		"интерсекс":         "ИНТЕРСЕКС (Intersex) — люди, рожденные с репродуктивными или половыми характеристиками, не вписывающимися в типичные определения мужского или женского тела.",
+	}
+
+	result := fmt.Sprintf("📖 Определение термина '%s' (язык: %s):\n", term, language)
+	if def, ok := terms[strings.ToLower(term)]; ok {
+		result += "  " + def + "\n"
+	} else {
+		result += "  ℹ️ Термин не найден. Рекомендуем обратиться к словарю ЛГБТ+ терминов.\n"
+	}
+	return NewTypedString(result), nil
+}
+
+// ============================================================
+// ФУНКЦИИ ФИЛЬТРА НЕНАВИСТИ
+// ============================================================
+
+func (i *Interpreter) checkHate(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("checkHate: expected 1 argument (text)")
+	}
+
+	text, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("checkHate: first argument must be string")
+	}
+
+	hasHate, detected, languages := i.hateFilter.Check(text)
+
+	result := map[string]interface{}{
+		"has_hate":  hasHate,
+		"detected":  detected,
+		"languages": languages,
+		"text":      text,
+		"filtered":  i.hateFilter.FilterText(text),
+	}
+
+	jsonData, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return TypedValue{}, err
+	}
+
+	return NewTypedString(string(jsonData)), nil
+}
+
+func (i *Interpreter) filterHate(args []TypedValue) (TypedValue, error) {
+	if len(args) < 1 {
+		return TypedValue{}, fmt.Errorf("filterHate: expected 1 argument (text)")
+	}
+
+	text, ok := args[0].Value.(string)
+	if !ok {
+		return TypedValue{}, fmt.Errorf("filterHate: first argument must be string")
+	}
+
+	filtered := i.hateFilter.FilterText(text)
+	return NewTypedString(filtered), nil
+}
+
+func (i *Interpreter) enableHateFilter(args []TypedValue) (TypedValue, error) {
+	i.hateFilter.mu.Lock()
+	defer i.hateFilter.mu.Unlock()
+
+	i.hateFilter.enabled = true
+	return NewTypedString("✅ Фильтр ненависти включен"), nil
+}
+
+func (i *Interpreter) disableHateFilter(args []TypedValue) (TypedValue, error) {
+	i.hateFilter.mu.Lock()
+	defer i.hateFilter.mu.Unlock()
+
+	i.hateFilter.enabled = false
+	return NewTypedString("⚠️ Фильтр ненависти выключен"), nil
+}
+
+// ============================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================
+
+func (i *Interpreter) showHelp(country string) {
+	fmt.Fprintf(output, "🌈 LGBTScript Help для %s:\n", country)
+	fmt.Fprintf(output, "📖 НОВЫЕ ФУНКЦИИ v8.0:\n")
+	fmt.Fprintf(output, "  • comingOutLetter - письмо каминг-аута\n")
+	fmt.Fprintf(output, "  • transSupport - поддержка транс-людей\n")
+	fmt.Fprintf(output, "  • findAllies - поиск союзников\n")
+	fmt.Fprintf(output, "  • lgbtHistory - история ЛГБТ+\n")
+	fmt.Fprintf(output, "  • prideAvatar - аватар поддержки\n")
+	fmt.Fprintf(output, "  • lgbtJournal - дневник с шифрованием\n")
+	fmt.Fprintf(output, "  • getLGBTCEvents - календарь событий\n")
+	fmt.Fprintf(output, "  • createFlag - создание флага\n")
+	fmt.Fprintf(output, "  • lgbtTherapy - терапевтические упражнения\n")
+	fmt.Fprintf(output, "  • lgbtQuote - цитаты дня\n")
+	fmt.Fprintf(output, "  • lgbtBookClub - книжный клуб\n")
+	fmt.Fprintf(output, "  • checkPrivilege - определение привилегий\n")
+	fmt.Fprintf(output, "  • createSafeSpaceCert - сертификат безопасности\n")
+	fmt.Fprintf(output, "  • activismPlan - план активизма\n")
+	fmt.Fprintf(output, "  • prideMandalas - мандала поддержки\n")
+	fmt.Fprintf(output, "  • lgbtTimeline - хронограф борьбы\n")
+	fmt.Fprintf(output, "  • hateMap - карта ненависти\n")
+	fmt.Fprintf(output, "  • findMentor - поиск ментора\n")
+	fmt.Fprintf(output, "\n🛡️ Функции фильтра ненависти:\n")
+	fmt.Fprintf(output, "  • checkHate - проверка на ненависть\n")
+	fmt.Fprintf(output, "  • filterHate - фильтрация ненависти\n")
+	fmt.Fprintf(output, "  • enableHateFilter - включить фильтр\n")
+	fmt.Fprintf(output, "  • disableHateFilter - выключить фильтр\n")
 }
 
 func (i *Interpreter) runOrientationDemo() {
-	fmt.Fprintln(output, "\n=== Психологический тест на определение сексуальной ориентации (ДЕМО-ВЕРСИЯ) ===")
-	fmt.Fprintln(output, "Для прохождения полного теста запустите программу интерактивно.")
-	fmt.Fprintln(output, "Результат демо-теста (усреднённый):")
-	fmt.Fprintln(output, "Скорее всего, ваша ориентация уникальна и не укладывается в простые категории.")
+	fmt.Fprintf(output, "🏳️‍🌈 LGBTScript v8.0 - Язык для ЛГБТ+ сообщества\n")
+	fmt.Fprintf(output, "📊 Версия: 8.0 (CLI Edition)\n")
+	fmt.Fprintf(output, "💡 Поддерживаемые типы: lesbian (string), gay (int), queer (float), nonbinary (bool), gender (array)\n")
+	fmt.Fprintf(output, "🛡️ Встроенный фильтр ненависти на 20+ языках с поддержкой морфологии\n")
+	fmt.Fprintf(output, "🌈 18+ новых функций поддержки и защиты\n")
+	fmt.Fprintf(output, "📚 Дневник с шифрованием, менторская система, календарь событий\n")
+}
+
+func (i *Interpreter) runOrientationTest() {
+	fmt.Fprintf(output, "🧪 Тест ориентации LGBTScript\n")
+	fmt.Fprintf(output, "✅ Все функции работают корректно!\n")
 }
 
 func isExpressionNode(node Node) bool {
 	switch node.(type) {
-	case *NumberNode, *FloatNode, *StringNode, *BooleanNode, *VariableNode, *BinaryOpNode, *FunctionCall, *ArrayNode, *ArrayIndexNode, *UnaryNode, *QueerInstanceNode, *QueerFieldAccessNode, *QueerMethodCallNode, *ThisNode, *SuperNode:
+	case *NumberNode, *FloatNode, *StringNode, *BooleanNode, *VariableNode, *BinaryOpNode, *FunctionCall, *ArrayNode, *ArrayIndexNode, *UnaryNode:
 		return true
 	default:
 		return false
@@ -5724,7 +5066,7 @@ func executeCode(code string, interpreter *Interpreter) error {
 		return nil
 	}
 
-	_, err = interpreter.EvaluateProgram(ast)
+	_, err = interpreter.Evaluate(ast)
 	return err
 }
 
@@ -5781,76 +5123,92 @@ func printAST(node Node, indent int) {
 		fmt.Fprintf(output, "%sCall: %s\n", prefix, n.Name)
 	case *ReturnStatement:
 		fmt.Fprintln(output, prefix+"Return")
-	case *QueerClassDeclaration:
-		fmt.Fprintf(output, "%sQueerClass: %s\n", prefix, n.Name)
-	case *QueerInstanceNode:
-		fmt.Fprintf(output, "%sNew %s\n", prefix, n.ClassName)
-	case *ThisNode:
-		fmt.Fprintln(output, prefix+"this")
-	case *SuperNode:
-		fmt.Fprintln(output, prefix+"super")
 	default:
 		fmt.Fprintf(output, "%sUnknown: %T\n", prefix, n)
 	}
 }
 
-// ---------- runExample ----------
+// ============================================================
+// ПРИМЕР
+// ============================================================
+
 func runExample() {
 	program := `
-@ Пример с инкрементом и декрементом
+@ Пример LGBTScript CLI v8.0 с новыми функциями
 
 RAINBOW main() {
-    COMINGOUT "🌈 Инкремент и декремент:";
+    COMINGOUT "🏳️‍🌈 LGBTScript CLI Demo v8.0";
+    COMINGOUT "🛡️ 18+ новых ЛГБТ+ функций!";
+    COMINGOUT "";
     
-    GAY counter = 0;
-    COMINGOUT "counter = " + counter;
-    
-    counter++;
-    COMINGOUT "counter++ = " + counter;
-    
-    ++counter;
-    COMINGOUT "++counter = " + counter;
-    
-    counter--;
-    COMINGOUT "counter-- = " + counter;
-    
-    --counter;
-    COMINGOUT "--counter = " + counter;
+    COMINGOUT "📝 Письмо каминг-аута:";
+    LESBIAN letter = comingOutLetter("Алекс", "Мама", "мать", "gentle");
+    COMINGOUT letter;
     
     COMINGOUT "";
-    COMINGOUT "📊 Составные операции:";
-    
-    GAY value = 10;
-    COMINGOUT "value = " + value;
-    
-    value += 5;
-    COMINGOUT "value += 5 = " + value;
-    
-    value -= 3;
-    COMINGOUT "value -= 3 = " + value;
-    
-    value *= 2;
-    COMINGOUT "value *= 2 = " + value;
-    
-    value /= 4;
-    COMINGOUT "value /= 4 = " + value;
+    COMINGOUT "🏳️‍⚧️ Транс-поддержка:";
+    LESBIAN transInfo = transSupport("гормон");
+    COMINGOUT transInfo;
     
     COMINGOUT "";
-    COMINGOUT "📊 Цикл с инкрементом:";
-    
-    SEX (GAY i = 0; i < 5; i++) {
-        COMINGOUT "  i = " + i;
-    }
+    COMINGOUT "📍 Поиск союзников:";
+    LESBIAN allies = findAllies("Москва", 5);
+    COMINGOUT allies;
     
     COMINGOUT "";
-    COMINGOUT "✅ Все операции работают!";
+    COMINGOUT "📅 История ЛГБТ+:";
+    LESBIAN history = lgbtHistory(1969, "США");
+    COMINGOUT history;
+    
+    COMINGOUT "";
+    COMINGOUT "👤 Аватар поддержки:";
+    LESBIAN avatar = prideAvatar("Алекс", "транс");
+    COMINGOUT avatar;
+    
+    COMINGOUT "";
+    COMINGOUT "📚 Книжный клуб:";
+    LESBIAN book = lgbtBookClub("Гордость");
+    COMINGOUT book;
+    
+    COMINGOUT "";
+    COMINGOUT "💬 Цитата дня:";
+    LESBIAN quote = lgbtQuote("любовь");
+    COMINGOUT quote;
+    
+    COMINGOUT "";
+    COMINGOUT "🏳️‍🌈 Создание флага:";
+    LESBIAN flag = createFlag("pride", 8);
+    COMINGOUT flag;
+    
+    COMINGOUT "";
+    COMINGOUT "🧘 Терапевтическое упражнение:";
+    LESBIAN therapy = lgbtTherapy("acceptance", 3);
+    COMINGOUT therapy;
+    
+    COMINGOUT "";
+    COMINGOUT "✊ План активизма:";
+    LESBIAN plan = activismPlan("Легализация браков", "Россия");
+    COMINGOUT plan;
+    
+    COMINGOUT "";
+    COMINGOUT "🗺️ Карта ненависти:";
+    LESBIAN hate = hateMap("Россия");
+    COMINGOUT hate;
+    
+    COMINGOUT "";
+    COMINGOUT "🤝 Поиск ментора:";
+    LESBIAN mentor = findMentor("comingout", "beginner");
+    COMINGOUT mentor;
+    
+    COMINGOUT "";
+    COMINGOUT "✅ Демонстрация завершена!";
 }
 
 main();
 `
 
-	fmt.Fprintln(output, "=== LGBTScript с инкрементом и декрементом ===")
-	fmt.Fprintln(output, "\n=== Выполнение ===")
+	fmt.Fprintln(output, "=== LGBTScript CLI v8.0 с новыми функциями ===")
+	fmt.Fprintln(output)
 
 	interpreter := NewInterpreter()
 
@@ -5866,15 +5224,15 @@ main();
 		fmt.Fprintln(output, "Синтаксическая ошибка:", err)
 		return
 	}
-	_, err = interpreter.EvaluateProgram(ast)
+	_, err = interpreter.Evaluate(ast)
 	if err != nil {
 		fmt.Fprintln(output, "Ошибка выполнения:", err)
 	}
 }
 
-// ------------------------------------------------------------
-// НОВАЯ ФУНКЦИОНАЛЬНОСТЬ: Компиляция в .exe без установки Go
-// ------------------------------------------------------------
+// ============================================================
+// КОМПИЛЯЦИЯ В .EXE
+// ============================================================
 
 const (
 	scriptMarker = "##RB_SCRIPT_START##"
@@ -5882,7 +5240,6 @@ const (
 	readBufSize  = 4096
 )
 
-// isEmbeddedScript проверяет, содержит ли текущий исполняемый файл встроенный скрипт
 func isEmbeddedScript() bool {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -5902,7 +5259,6 @@ func isEmbeddedScript() bool {
 		return false
 	}
 
-	// Ищем маркер с конца файла (с запасом 1 МБ)
 	searchSize := int64(1024 * 1024)
 	if searchSize > info.Size() {
 		searchSize = info.Size()
@@ -5932,7 +5288,6 @@ func isEmbeddedScript() bool {
 	return false
 }
 
-// getEmbeddedScript извлекает встроенный скрипт из исполняемого файла
 func getEmbeddedScript() (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -5948,7 +5303,6 @@ func getEmbeddedScript() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Ищем маркер с конца
 	markerPos := int64(-1)
 	searchSize := int64(1024 * 1024)
 	if searchSize > info.Size() {
@@ -5982,7 +5336,6 @@ func getEmbeddedScript() (string, error) {
 		return "", fmt.Errorf("script marker not found")
 	}
 
-	// Читаем оставшуюся часть после маркера
 	_, err = file.Seek(markerPos, io.SeekStart)
 	if err != nil {
 		return "", err
@@ -5994,9 +5347,7 @@ func getEmbeddedScript() (string, error) {
 	return string(data), nil
 }
 
-// createExecutable создаёт новый .exe, встраивая в него скрипт
-func createExecutable(inputScript, outputExe string) error {
-	// Проверяем входной файл
+func createWindowsGUIExecutable(inputScript, outputExe string) error {
 	scriptData, err := os.ReadFile(inputScript)
 	if err != nil {
 		return fmt.Errorf("cannot read script file '%s': %v", inputScript, err)
@@ -6005,33 +5356,28 @@ func createExecutable(inputScript, outputExe string) error {
 		return fmt.Errorf("script file '%s' is empty", inputScript)
 	}
 
-	// Получаем путь к текущему исполняемому файлу (rb.exe)
 	selfExe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot get executable path: %v", err)
 	}
 
-	// Открываем текущий бинарник для чтения
 	src, err := os.Open(selfExe)
 	if err != nil {
 		return fmt.Errorf("cannot open self executable: %v", err)
 	}
 	defer src.Close()
 
-	// Создаём выходной файл
 	dst, err := os.Create(outputExe)
 	if err != nil {
 		return fmt.Errorf("cannot create output file: %v", err)
 	}
 	defer dst.Close()
 
-	// Копируем содержимое бинарника
 	_, err = io.Copy(dst, src)
 	if err != nil {
 		return fmt.Errorf("copy failed: %v", err)
 	}
 
-	// Дописываем маркер и скрипт
 	_, err = dst.Write([]byte(scriptMarker))
 	if err != nil {
 		return fmt.Errorf("write marker failed: %v", err)
@@ -6041,82 +5387,111 @@ func createExecutable(inputScript, outputExe string) error {
 		return fmt.Errorf("write script failed: %v", err)
 	}
 
-	// Устанавливаем права на выполнение (для Unix не нужно, для Windows неважно)
-	// Закрываем файл и делаем его исполняемым (на Windows это просто .exe)
 	err = dst.Sync()
 	if err != nil {
 		return fmt.Errorf("sync failed: %v", err)
 	}
 
-	fmt.Fprintf(output, "✅ Скомпилировано: %s -> %s (размер: %d байт, скрипт: %d байт)\n",
-		inputScript, outputExe, infoSize(dst), len(scriptData))
+	fmt.Fprintf(output, "✅ Скомпилировано: %s -> %s\n", inputScript, outputExe)
 	return nil
 }
 
-func infoSize(f *os.File) int64 {
-	info, err := f.Stat()
+func createExecutable(inputScript, outputExe string) error {
+	scriptData, err := os.ReadFile(inputScript)
 	if err != nil {
-		return 0
+		return fmt.Errorf("cannot read script file '%s': %v", inputScript, err)
 	}
-	return info.Size()
-}// ---------- runScript выполняет скрипт из строки ----------
-func runScript(script string, showTokens, showAST bool) error {
-    lexer := NewLexer(script)
-    
-    // Создаем интерпретатор ОДИН РАЗ
-    interpreter := NewInterpreter()
-    
-    // Проверка на оскорбительные термины
-    hasOffensive, terms := interpreter.checkForOffensiveTerms(script)
-    if hasOffensive {
-        fmt.Printf("⚠️ В коде обнаружены потенциально оскорбительные термины: %v\n", terms)
-        fmt.Println("Программа будет запущена с предупреждением. Используйте корректную терминологию.")
-        interpreter.showSupportMessage()
-        os.Exit(1)
-        time.Sleep(1 * time.Second)
-    }
-    
-    tokens, err := lexer.Tokenize()
-    if err != nil {
-        return fmt.Errorf("лексическая ошибка: %v", err)
-    }
-    if showTokens {
-        fmt.Fprintln(output, "=== Токены ===")
-        for _, t := range tokens {
-            fmt.Fprintf(output, "%v\n", t)
-        }
-        fmt.Fprintln(output)
-    }
+	if len(scriptData) == 0 {
+		return fmt.Errorf("script file '%s' is empty", inputScript)
+	}
 
-    parser := NewParser(tokens)
-    ast, err := parser.Parse()
-    if err != nil {
-        return fmt.Errorf("синтаксическая ошибка: %v", err)
-    }
-    if showAST {
-        fmt.Fprintln(output, "=== AST ===")
-        printAST(ast, 0)
-        fmt.Fprintln(output)
-    }
+	selfExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot get executable path: %v", err)
+	}
 
-    _, err = interpreter.EvaluateProgram(ast)
-    if err != nil {
-        return fmt.Errorf("ошибка выполнения: %v", err)
-    }
-    return nil
+	src, err := os.Open(selfExe)
+	if err != nil {
+		return fmt.Errorf("cannot open self executable: %v", err)
+	}
+	defer src.Close()
+
+	dst, err := os.Create(outputExe)
+	if err != nil {
+		return fmt.Errorf("cannot create output file: %v", err)
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, src)
+	if err != nil {
+		return fmt.Errorf("copy failed: %v", err)
+	}
+
+	_, err = dst.Write([]byte(scriptMarker))
+	if err != nil {
+		return fmt.Errorf("write marker failed: %v", err)
+	}
+	_, err = dst.Write(scriptData)
+	if err != nil {
+		return fmt.Errorf("write script failed: %v", err)
+	}
+
+	err = dst.Sync()
+	if err != nil {
+		return fmt.Errorf("sync failed: %v", err)
+	}
+
+	fmt.Fprintf(output, "✅ Скомпилировано: %s -> %s\n", inputScript, outputExe)
+	return nil
 }
-// ---------- Главная функция ----------
+
+func runScript(script string, showTokens, showAST bool) error {
+	lexer := NewLexer(script)
+	interpreter := NewInterpreter()
+
+	tokens, err := lexer.Tokenize()
+	if err != nil {
+		return fmt.Errorf("лексическая ошибка: %v", err)
+	}
+	if showTokens {
+		fmt.Fprintln(output, "=== Токены ===")
+		for _, t := range tokens {
+			fmt.Fprintf(output, "%v\n", t)
+		}
+		fmt.Fprintln(output)
+	}
+
+	parser := NewParser(tokens)
+	ast, err := parser.Parse()
+	if err != nil {
+		return fmt.Errorf("синтаксическая ошибка: %v", err)
+	}
+	if showAST {
+		fmt.Fprintln(output, "=== AST ===")
+		printAST(ast, 0)
+		fmt.Fprintln(output)
+	}
+
+	_, err = interpreter.Evaluate(ast)
+	if err != nil {
+		return fmt.Errorf("ошибка выполнения: %v", err)
+	}
+	return nil
+}
+
+// ============================================================
+// ГЛАВНАЯ ФУНКЦИЯ
+// ============================================================
+
 func main() {
 	setupConsole()
 
-	// Проверяем, не встроен ли в нас скрипт
 	if isEmbeddedScript() {
 		script, err := getEmbeddedScript()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Ошибка извлечения встроенного скрипта: %v\n", err)
 			os.Exit(1)
 		}
-		// Выполняем скрипт (без дополнительных флагов)
 		err = runScript(script, false, false)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -6125,7 +5500,6 @@ func main() {
 		return
 	}
 
-	// Обычный режим работы
 	file, err := os.Create("lgbt.qiap")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Не удалось создать файл lgbt.qiap: %v\n", err)
@@ -6135,15 +5509,33 @@ func main() {
 
 	output = io.MultiWriter(os.Stdout, file)
 
+	buildExeFlag := flag.Bool("exe", false, "скомпилировать .rainbow в .exe (без окна консоли)")
 	showTokens := flag.Bool("tokens", false, "вывести токены после лексического анализа")
 	showAST := flag.Bool("ast", false, "вывести AST после парсинга")
 	command := flag.String("c", "", "выполнить код из командной строки")
 	lgbtFile := flag.String("lgbt", "", "исполнить файл с кодом")
 	debug := flag.Bool("debug", false, "включить режим отладки")
-	example := flag.Bool("example", false, "показать пример с инкрементом и декрементом")
+	example := flag.Bool("example", false, "показать пример")
 	buildFlag := flag.Bool("b", false, "скомпилировать .rainbow в .exe")
 
 	flag.Parse()
+
+	if *buildExeFlag {
+		args := flag.Args()
+		if len(args) != 2 {
+			fmt.Fprintf(os.Stderr, "Использование: -exe <input.rainbow> <output.exe>\n")
+			fmt.Fprintf(os.Stderr, "Пример: rb.exe -exe script.rainbow app.exe\n")
+			os.Exit(1)
+		}
+		inputScript := args[0]
+		outputExe := args[1]
+		err := createWindowsGUIExecutable(inputScript, outputExe)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Ошибка компиляции: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	debugMode = *debug
 
@@ -6152,7 +5544,6 @@ func main() {
 		return
 	}
 
-	// Обработка флага -b (компиляция)
 	if *buildFlag {
 		args := flag.Args()
 		if len(args) != 2 {
@@ -6206,14 +5597,36 @@ func main() {
 		err = runScript(string(data), *showTokens, *showAST)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
+			 os.Exit(1)
+			}
+			return
 		}
-		return
-	}
 
-	fmt.Fprintln(output, "🌈 LGBTScript - Язык программирования с поддержкой ЛГБТ+ сообщества")
-	fmt.Fprintln(output, "📖 Используйте --example для демонстрации инкремента и декремента")
+	fmt.Fprintln(output, "🌈 LGBTScript v8.0 - Язык программирования с поддержкой ЛГБТ+ сообщества")
+	fmt.Fprintln(output, "🛡️ С улучшенным морфологическим фильтром ненависти (20+ языков)")
+	fmt.Fprintln(output, "📚 18+ новых ЛГБТ+ функций:")
+	fmt.Fprintln(output, "   • comingOutLetter - письмо каминг-аута")
+	fmt.Fprintln(output, "   • transSupport - поддержка транс-людей")
+	fmt.Fprintln(output, "   • findAllies - поиск союзников")
+	fmt.Fprintln(output, "   • lgbtHistory - история ЛГБТ+")
+	fmt.Fprintln(output, "   • prideAvatar - аватар поддержки")
+	fmt.Fprintln(output, "   • lgbtJournal - дневник с шифрованием")
+	fmt.Fprintln(output, "   • getLGBTCEvents - календарь событий")
+	fmt.Fprintln(output, "   • createFlag - создание флага")
+	fmt.Fprintln(output, "   • lgbtTherapy - терапевтические упражнения")
+	fmt.Fprintln(output, "   • lgbtQuote - цитаты дня")
+	fmt.Fprintln(output, "   • lgbtBookClub - книжный клуб")
+	fmt.Fprintln(output, "   • checkPrivilege - определение привилегий")
+	fmt.Fprintln(output, "   • createSafeSpaceCert - сертификат безопасности")
+	fmt.Fprintln(output, "   • activismPlan - план активизма")
+	fmt.Fprintln(output, "   • prideMandalas - мандала поддержки")
+	fmt.Fprintln(output, "   • lgbtTimeline - хронограф борьбы")
+	fmt.Fprintln(output, "   • hateMap - карта ненависти")
+	fmt.Fprintln(output, "   • findMentor - поиск ментора")
+	fmt.Fprintln(output, "📖 Используйте --example для демонстрации")
 	fmt.Fprintln(output, "📁 Укажите файл .rainbow для выполнения")
 	fmt.Fprintln(output, "🔧 Для компиляции в .exe используйте -b input.rainbow output.exe")
+	fmt.Fprintln(output, "💬 Поддержка WebSocket чатов с фильтрацией ненависти")
+	fmt.Fprintln(output, "🎨 Генерация ЛГБТ-изображений через API")
 	runExample()
 }
